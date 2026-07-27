@@ -35,6 +35,7 @@ import {
 } from './dominio/progetto.js'
 import { ArchivioProgetto } from './progetto/archivio.js'
 import { LibreriaSuoni } from './audio/libreria.js'
+import { trovaFfmpeg } from './media/ffmpeg.js'
 import { MotoreAudio } from './audio/motore-audio.js'
 import { AnteprimaSuoni } from './audio/anteprima.js'
 import { SUONO_IDENTIFICA, SUONO_PROVA, scriviSegnali } from './audio/segnali.js'
@@ -1082,7 +1083,17 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
   }
 
   const cartellaCache = path.join(cartellaDati, 'cache')
-  const libreria = new LibreriaSuoni(path.join(cartellaDati, 'suoni'), cartellaCache)
+  // Lo stesso ffmpeg della registrazione, cioe quello in bundle. Lasciare il
+  // default `'ffmpeg'` voleva dire cercarlo nel PATH: su Windows lo trovava per
+  // caso (lo shim di Chocolatey), sul PC Linux della casa non c'era e ogni
+  // Suono importato finiva in «ffmpeg non trovato» con il binario a 140 MB
+  // dentro il pacchetto, a un metro di distanza (misurato il 18 settembre 2026).
+  // Il ripiego sul PATH resta solo quando il bundle manca davvero.
+  const libreria = new LibreriaSuoni(
+    path.join(cartellaDati, 'suoni'),
+    cartellaCache,
+    trovaFfmpeg()?.percorso ?? 'ffmpeg',
+  )
 
   // Il motore si crea prima del thread audio, e il thread audio ha bisogno di
   // parlargli: si risolve con un rimando, non con un ordine di costruzione

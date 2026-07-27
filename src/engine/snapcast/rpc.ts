@@ -42,6 +42,19 @@ export interface OpzioniRpc {
 export const OPZIONI_RPC: OpzioniRpc = { host: '127.0.0.1', porta: 1705, timeoutMs: 5000 }
 
 /**
+ * Dove collegarsi, quando non e il default.
+ *
+ * La porta di controllo sta nel progetto (`server.portaControllo`) e
+ * l'Operatore la puo cambiare in Impostazioni: il file di configurazione la
+ * segue gia, e il client deve seguirla anche lui, o parlerebbe a una porta su
+ * cui il nostro server non ascolta piu -- e su cui potrebbe ascoltare un altro.
+ */
+export interface Destinazione {
+  readonly host?: string
+  readonly porta?: number
+}
+
+/**
  * Eventi emessi:
  *   'notifica'   (metodo, params)  -- una notifica dal server
  *   'collegato'                    -- connessione stabilita
@@ -61,10 +74,13 @@ export class ClientRpc extends EventEmitter {
     return this.socket !== null && !this.socket.destroyed
   }
 
-  async collega(): Promise<void> {
+  async collega(dove: Destinazione = {}): Promise<void> {
     if (this.collegato) return
     await new Promise<void>((ok, ko) => {
-      const s = connect({ host: this.opzioni.host, port: this.opzioni.porta })
+      const s = connect({
+        host: dove.host ?? this.opzioni.host,
+        port: dove.porta ?? this.opzioni.porta,
+      })
       const suErrore = (e: Error) => {
         s.destroy()
         ko(e)

@@ -691,6 +691,90 @@ Dentro la distro `Ubuntu` di questa macchina — kernel Linux vero — con Node 
   icon is not set». Nel repo non c'è nessuna icona, né PNG per Linux né `.ico` per l'installer
   Windows. Il pacchetto si costruisce e parte lo stesso, con l'icona di Electron.
 
+### Su una Ubuntu vera, 18 settembre 2026: il servizio di sistema si prende l'audio
+
+La macchina è quella del committente: Ubuntu 26.04 (kernel 7.0), sessione GNOME, Node 24.21,
+snapserver 0.35.0 compilato a mano in `/usr/local/bin` con una unit `snapserver.service`
+**abilitata** (`User=snapserver`, una sola sorgente `pipe:///tmp/snapfifo` chiamata `default`),
+Regia 0.2.2 installata dal `.deb` in `/opt/Regia`. È la prima prova della Sede locale con una
+sessione grafica, un telefono vero e Regia che gira come l'utente e non come root. La sera del
+16 settembre il committente ha riferito «le telecamere sì, l'audio no»; il 18 si è ripetuto il
+giro con il motore headless (`npx tsx src/engine/avvia.ts`) contro lo stesso servizio attivo.
+
+- **[misurato]** ⚠️ **Con `snapserver.service` attivo il nostro snapserver parte lo stesso, sordo.**
+  `avvia()` scrive la configurazione in `/run/user/1000/regia/`, lancia `setsid snapserver -c …`
+  e il processo **resta vivo**: nel suo `server.log` compaiono tre righe
+  `[Error] … bind: Address already in use` (1705, 1780, 1704), ma snapserver 0.35 non esce —
+  continua con le sole sorgenti `tcp://0.0.0.0:4953` e `:4954` in ascolto. `pgrep -x snapserver`
+  lo trova, quindi il supervisore scriveva «avviato»; gli scrittori del thread audio si collegano
+  alle sorgenti e le Zone risultano `attivo` con scarto ~200 ms. Audio che entra in un server che
+  nessun telefono può raggiungere.
+- **[misurato]** ⚠️ **Sulla 1705 rispondeva il server di sistema, e Regia lo prendeva per suo.**
+  `collegaEVerifica()` scriveva «Collegato al server audio: 1 Flussi, 1 client conosciuti», poi
+  «Server audio acceso: 2 Flussi, buffer 2000 ms…», stato `acceso`, e «Riconciliazione fallita:
+  Internal error: Stream not found» ogni 5 s. Nel journal del servizio, la sera del 16: il Pixel 10
+  (Snapdroid v0.29.0, Android 17) collegato da `192.168.1.7` e messo dal server nel gruppo dello
+  stream `default` — una FIFO che nessuno scrive —, e `Group.SetStream … "Non assegnati"` →
+  `Stream not found` **98 volte in 7 minuti**. È il «l'audio non funziona» della prova, e non
+  c'entrano né la rete né il telefono: il telefono ha raggiunto la 1705 e la 1704 di questo PC
+  dalla LAN, senza ponte, come l'ADR 0011 prevedeva — solo che dietro c'era il server sbagliato.
+- **[misurato]** La riga di Diario del punto 9 dell'elenco qui sotto **non poteva comparire**:
+  `colpaDiUnAltroServer` scattava solo se l'avvio falliva, e l'avvio non falliva. E il controllo
+  «non ha i Flussi» di `adotta()` era giusto ma **guardava dopo aver copiato** `osservato` e
+  `vivi`: a server `spento` l'interfaccia mostrava il Pixel con l'indirizzo `::ffff:192.168.1.7`,
+  letto dal server estraneo.
+  → La prova che il server sulla porta di controllo è il nostro è **che abbia i Flussi del
+  progetto**, e ora la fa `collegaEVerifica()` a ogni collegamento (`ServerEstraneo`), prima di
+  toccare qualunque stato. Rieseguito con lo stesso servizio attivo: `Avvia` fallisce in **1,8 s**
+  con «snapserver e partito ma il server audio che risponde non e il nostro: non ha i Flussi
+  "TEST", "Non assegnati" (ha "default"): le porte 1704, 1705 e 1780 le tiene un altro server
+  audio, e il nostro non ha potuto aprirle. L'ho spento (dal suo log: "… bind: Address already in
+  use …"). Attenzione: su questa macchina c'e un servizio "snapserver" gia attivo (systemd) …
+  "sudo systemctl disable --now snapserver"», stato `caduto`, nessun nostro processo rimasto,
+  scrittori tornati a `in collegamento`. `pgrep -x -u "$(id -u)" snapserver` dentro `bash -lc`
+  distingue il nostro (utente `supremo`) dal servizio (utente `snapserver`).
+- **[misurato]** Il client RPC parlava sempre a `127.0.0.1:1705` anche quando il progetto diceva
+  un'altra `portaControllo`: il file di configurazione seguiva l'impostazione, il client no. Ora
+  la segue, ed è quello che ha permesso la prova qui sotto.
+
+### Il percorso audio intero su questa macchina, 18 settembre 2026
+
+Regia headless con un progetto su porte alternative (2704/2705/2780, Flussi da 5953: quelle di
+default le teneva il servizio), il **suo** snapserver, e due `snapclient` 0.35 nativi con
+`--player file:filename=/dev/null` e `--hostID regia-finto-1/2`.
+
+- **[misurato]** `server.avvia` → `acceso` in 1,5 s con tre Flussi (Ingresso, Cantina, Non
+  assegnati), tutti `idle` a casa vuota. I due client compaiono come Altoparlanti con
+  **l'indirizzo vero** (`127.0.0.1`, non «via ponte»), il riconciliatore li mette nei gruppi delle
+  Zone assegnate alla prima passata, e quando i processi muoiono passano a `collegato: false`
+  entro un secondo.
+- **[misurato]** **Il suono di prova porta `Ingresso` a `playing` per tutta la durata, mentre
+  `Cantina` resta `idle`**; a suono finito tutti e tre tornano `idle`. È il criterio «passano a
+  `playing` mentre si suona» visto sulla Sede locale.
+- **[misurato]** **Previsione del punto 2 confermata, per la metà che si è potuta misurare:** su un
+  orologio solo `ritardoMsAlSecondo` è 0 (min e max su 40 s, due Zone) e `scartoMs` oscilla fra
+  199 e 219 ms, cioè sta fermo attorno all'anticipo di 200 ms. Non è stata guardata la forma
+  d'onda in uscita dai client.
+- **[misurato]** **Punto 4: `snapclient` nativo si sincronizza con il snapserver della stessa
+  macchina** — `diff to server [ms]: -0.005` e `0.01`, zero «No chunks available» in 40 s. Il banco
+  su Linux può avere Altoparlanti finti nativi; il giro dalla distro non serve.
+- **[misurato]** ⚠️ `snapclient --player null` **non è un lettore**: `null` è il nome di una
+  scheda del lettore ALSA/PipeWire, e il client esce con 1 dicendo «PCM device "default" not
+  found». Il lettore nullo è `file:filename=/dev/null`, come fa già `banco/altoparlanti-finti.ts`.
+- **[misurato]** Il `.deb` bookworm di snapclient 0.35 su Ubuntu 26.04 cerca `libFLAC.so.12` e il
+  sistema ha la `.so.14`: con un link simbolico parte (un avviso «Symbol … has different size»),
+  e con il codec `pcm` FLAC non viene toccato. Per il banco è un ripiego, non una soluzione:
+  `banco/prepara.ts` lo scarica in `/opt` e lì il problema si ripresenterebbe.
+- **[misurato]** `npm test` su questa macchina: **260 test, 255 passati, 0 falliti, 5 saltati**
+  (vogliono `ffprobe`, che il bundle non porta). Con `ffmpeg` fuori dal PATH ne saltano 9:
+  `libreria.test.ts` e `index.test.ts` cercano `ffmpeg` nel PATH, non in `vendor/ffmpeg`.
+- **[misurato]** Dal journal del 16 settembre: il `tar.gz` estratto sul Desktop **non parte** —
+  «The SUID sandbox helper binary was found, but is not configured correctly … chrome-sandbox is
+  owned by root and has mode 4755» — mentre il `.deb` (che il committente ha costruito a parte:
+  `dpkg -l` lo elenca, `apt install ./regia_0.2.2_amd64.deb`) si installa in `/opt/Regia`, mette
+  `chrome-sandbox` a root:4755, e la finestra si apre dal menu di GNOME. Il punto 10 qui sotto va
+  riletto così.
+
 ### Da misurare su una macchina Linux vera
 
 In ordine di quanto bloccano. Nessuna di queste è chiusa dalla prova del 10 settembre, e la
@@ -704,6 +788,10 @@ misura è un danno.
    condizione non basta (ADR 0010). Nessun telefono vero si è mai collegato a un snapserver
    Linux avviato da Regia. Da verificare insieme: che `AltoparlanteVivo.indirizzo` mostri
    l'indirizzo **vero** del telefono, che su Windows non si può avere.
+   → **Quasi chiuso il 18 settembre** (sezione sopra): un telefono vero ha raggiunto la 1705 e la
+   1704 di questo PC dalla LAN senza ponte — ma era il server di sistema a rispondere —, e due
+   client nativi hanno raggiunto il nostro con l'indirizzo vero. Manca solo il telefono sul
+   **nostro** server, che si prova appena il servizio di sistema è spento.
 2. **Previsione: lo scarto d'orologio sparisce, e con lui tutta la sezione «L'orologio della
    distro detta il ritmo».** Quel blocco — l'orologio monotono della distro il 3,5% più lento di
    quello di Windows, snapserver che legge a 169.797 B/s invece di 176.400, i 730 ms di coda
@@ -714,6 +802,8 @@ misura è un danno.
    conclusione di quel blocco va riletta da capo.
    ⚠️ La prova del 10 settembre **non dice niente su questo**: girava dentro la distro, cioè
    sull'orologio storto, e per giunta senza misurare il Passo.
+   → **Confermata a metà il 18 settembre**: `ritardoMsAlSecondo` 0 e `scartoMs` fermo fra 199 e
+   219 ms per 40 s. Resta da guardare la forma d'onda in uscita dai client.
 3. **La sincronizzazione e la latenza pulsante→suono fra telefoni veri**, con lo sweep
    dell'anticipo già in elenco fra le misure che restano al telefono vero. Su Windows lo sweep
    passa dal ponte; su Linux non c'è ponte, quindi non è la stessa misura ed entrambe vanno
@@ -722,6 +812,8 @@ misura è un danno.
    banco di prova può avere Altoparlanti finti **nativi**. Su Windows non ci riesce — riporta uno
    scarto di un epoch Unix e scarta ogni chunk — ed è per questo che oggi girano dentro la
    distro. Se su Linux funziona, il banco cambia forma: niente distro nemmeno per il collaudo.
+   → **Misurato il 18 settembre: funziona** (`diff to server` di ±0,01 ms). Il banco su Linux può
+   avviare i client nativi; `prepara.ts` deve però fare i conti con `libFLAC.so.12` (sopra).
 5. **L'anteprima di un Suono dalle casse del PC.** `anteprima.ts` cerca nell'ordine `pw-play`,
    `paplay`, `aplay`, `ffplay`, e su Windows passa invece da `Media.SoundPlayer` di PowerShell.
    **Nessuno dei quattro è mai stato eseguito**, e non si sa nemmeno quale di loro si trovi su
@@ -745,6 +837,10 @@ misura è un danno.
    chiede `systemctl is-active snapserver` e dovrebbe nominare il colpevole. Quella riga di Diario
    non l'ha mai letta nessuno, e su una macchina dove qualcuno aveva già fatto
    `apt install snapserver` è il fallimento più probabile alla prima accensione.
+   → **Misurato il 18 settembre, ed era peggio della previsione**: l'avvio non falliva affatto,
+   quindi la riga non poteva comparire e Regia si dichiarava accesa sul server di sistema. Ora la
+   prova è sui Flussi, e la riga con `systemctl` compare — in 1,8 s — anche all'avvio di Regia,
+   quando `adotta()` trova il servizio (sezione sopra, e ADR 0011, correzione).
 10. **Il pacchetto Linux: costruito, mai lanciato con uno schermo davanti.** La build c'è (vedi
     la sezione qui sopra) e dentro c'è tutto quello che deve esserci. Quello che manca è
     l'unica cosa che la build non può dire: che l'AppImage **si apra** su un desktop vero —
@@ -752,6 +848,11 @@ misura è un danno.
     `libfuse2`, ed è la ragione per cui il `tar.gz` gli sta accanto come ripiego. Nella distro
     non c'è sessione grafica: si è potuto verificare che l'archivio si estrae e che `AppRun`
     parte, non che la finestra compaia.
+    → **Il 16 settembre, su questo desktop**: il `tar.gz` estratto non parte per il
+    `chrome-sandbox` senza SUID (journal: «is not configured correctly … owned by root and has
+    mode 4755»); l'AppImage è stato montato da udisks invece che eseguito (serve il bit di
+    esecuzione e, su Ubuntu 26.04, il FUSE giusto — non è stato guardato oltre); il `.deb`
+    costruito a parte si installa e la finestra si apre. È il `.deb` ad aver retto la prova.
     → Resta anche l'icona: la build avvisa «default Electron icon is used», e finché nel repo
     non c'è un file, Regia si presenta con l'atomo di Electron.
     → E resta da decidere se snapserver vada dichiarato come dipendenza di un `.deb` — oggi il
@@ -925,3 +1026,47 @@ l'altro), riproducendo la pipeline di registrazione con i moduli veri `MuxTs`/`P
   flussi video, 2× `MuxTs` e 2× scritture su stdin di ffmpeg — quando `campioni()` ritarda,
   `ultimoCampioneIl` invecchia e `giro()` inietta silenzio (`quiete > PAZIENZA_MS`). **Cura non
   ancora scelta** (vedi `.scratch/registrazioni-difettose/piano.md`, punto 5).
+
+## I Suoni che «non trovano ffmpeg» sul PC Linux, misurato il 18 settembre 2026
+
+- **[misurato]** ⚠️ **La libreria dei Suoni cercava ffmpeg nel PATH e ignorava il binario in
+  bundle.** `new LibreriaSuoni(suoni, cache)` lasciava il default `'ffmpeg'`; `trovaFfmpeg()` lo
+  usavano solo la registrazione e il Setup. Su Windows non si vedeva perché lo shim di Chocolatey
+  sta nel PATH; sul PC della casa (Ubuntu 26.04, nessun ffmpeg di sistema) ogni import finiva in
+  «non riesco a decodificare "storm.mp3": ffmpeg non trovato», con `/opt/Regia/resources/vendor/
+  ffmpeg/ffmpeg` presente ed eseguibile. Ora il motore passa alla libreria `trovaFfmpeg()?.percorso`
+  e il PATH resta il ripiego. Verificato dal vivo: `POST /api/suoni?nome=storm.mp3` → 200,
+  `durataMs` 10000, `zona.suona` porta lo stream `TEST` a `playing` per 12 campioni su 12, uno
+  snapclient nativo locale in gruppo con «diff to server» 0 ms. I test della libreria (8) ora
+  girano anche qui: prima si saltavano proprio sulla macchina dove contavano.
+- **[misurato]** ⚠️ **Un Altoparlante resta `collegato` per minuti dopo che la rete sotto di lui
+  è sparita.** Il cavo verso il router dedicato ha perso la portante alle 15:02:49; alle 15:11 il
+  Diario non aveva detto niente e lo stato riportava ancora `"moto g 5G", collegato: true,
+  192.168.1.2`. La socket di snapserver verso il telefono era viva solo per il kernel: `ss -tni`
+  mostrava `Send-Q 62604`, `bytes_retrans 64644`, `backoff 12`, `lastrcv` ~9 minuti, e l'indirizzo
+  locale era ancora `192.168.1.6`, che l'interfaccia non ha più. Snapserver se ne accorge solo
+  quando il TCP rinuncia alle ritrasmissioni (`tcp_retries2` = 15, cioè un quarto d'ora abbondante):
+  non manda keepalive e non usa le `Time` mancanti del client come segno di vita. Il «collegato»
+  dell'istantanea è quindi una proiezione dello stato di snapserver, non una prova che i byte
+  arrivino. Cura non scelta: un orologio nostro sul `lastSeen` di ogni client, o `Server.GetStatus`
+  con `client.lastSeen` confrontato al nostro orologio.
+- **[misurato]** **Il router dedicato dà il DHCP sul cavo e usa `192.168.1.0/24`, lo stesso del
+  Wi‑Fi di casa.** Journal del 18 settembre: `dhcp4 (enp2s0): new lease, address=192.168.1.6`
+  alle 14:50:10 mentre `wlp3s0` teneva `192.168.1.17` da `Vodafone-Supremo`. Due interfacce sulla
+  stessa sottorete: il kernel sceglie una rotta sola per `192.168.1.0/24`, e quale delle due vince
+  dipende dalla metrica, non dal cavo. Con il cavo staccato tutto il `192.168.1.x` va sul Wi‑Fi di
+  casa. Alle 15:10 una scansione ARP del Wi‑Fi di casa non trovava né `.2` né `.10`; alle 15:35 il
+  telefono rispondeva a `.10` **sul Wi‑Fi di casa** (MAC randomizzato `26:3a:3c:…`, porta 4444
+  aperta, ping 120–170 ms: si stava svegliando). Un telefono in doze può non rispondere all'ARP
+  per minuti: una scansione negativa non prova che non ci sia. Finché le due reti condividono la
+  sottorete, l'indirizzo da scrivere in Snapdroid è quello che Regia mostra in Setup **per
+  l'interfaccia che il telefono condivide**.
+- **[misurato]** ⚠️ **`npm test` non finisce se sulla macchina è vivo uno snapserver sulle porte di
+  default, anche orfano.** Su Linux la Sede è il PC, quindi i motori dei test parlano con ciò che
+  ascolta davvero su 1705 e sui Flussi 4953+. Con lo snapserver di una Regia precedente ancora
+  acceso (setsid: sopravvive alla chiusura, ed è voluto) `index.test.ts` passa tutti i suoi test e
+  poi il processo non esce: una volta è arrivato a 331 s e la suite è finita rossa; con la Regia
+  viva accanto, i test le hanno anche ucciso e fatto riavviare snapserver tre volte. Con
+  `pkill -x snapserver` prima: 260 test, 255 passati, 5 saltati (registrazione, vogliono `ffprobe`
+  nel PATH), 0 falliti, esito 0. Prima della suite: `ss -ltn | grep 1705` deve essere vuoto.
+

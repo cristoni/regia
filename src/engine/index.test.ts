@@ -19,12 +19,15 @@ import type { Evento, Stato } from './api/protocollo.js'
 import type { Progetto, Suono, Zona } from './dominio/progetto.js'
 import { progettoVuoto } from './dominio/progetto.js'
 import { avviaMotore, MotoreRegia, type MotoreAvviato } from './index.js'
+import { trovaFfmpeg } from './media/ffmpeg.js'
 
 const daPulire: Array<() => Promise<void>> = []
+// Lo stesso binario del motore: in bundle se c'e, altrimenti dal PATH.
+const FFMPEG = trovaFfmpeg()?.percorso ?? 'ffmpeg'
 let ffmpegDisponibile = false
 
 before(() => {
-  ffmpegDisponibile = spawnSync('ffmpeg', ['-version'], { windowsHide: true }).status === 0
+  ffmpegDisponibile = spawnSync(FFMPEG, ['-version'], { windowsHide: true }).status === 0
 })
 after(async () => {
   for (const f of daPulire.reverse()) await f().catch(() => {})
@@ -106,7 +109,7 @@ async function ambiente(): Promise<{ cartella: string; motore: MotoreAvviato }> 
 
 function generaTono(destinazione: string, secondi = 1): void {
   spawnSync(
-    'ffmpeg',
+    FFMPEG,
     ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
      '-i', `sine=frequency=440:duration=${secondi}`, '-y', destinazione],
     { windowsHide: true },

@@ -78,6 +78,44 @@ export interface OpzioniSupervisore {
   readonly sede?: () => Sede
 }
 
+/**
+ * Sulla porta di controllo risponde un snapserver, ma **non ha i nostri Flussi**:
+ * non e quello che abbiamo configurato noi.
+ *
+ * E un errore con un nome suo perche chi lo riceve deve poterlo distinguere
+ * da "non risponde nessuno": a un server che non risponde si riprova, a un
+ * server estraneo no -- riprovare non lo rendera nostro, e ogni tentativo in
+ * piu e tempo in cui l'Operatore non sa ancora cosa c'e che non va.
+ *
+ * Misurato il 18 settembre 2026 su una Ubuntu vera: con `snapserver.service`
+ * di sistema acceso, il nostro snapserver **parte lo stesso** -- 0.35 scrive
+ * `bind: Address already in use` per le tre porte e continua a girare con le
+ * sole sorgenti -- e `pgrep` lo trova vivo. L'unica prova che il server sulla
+ * 1705 e il nostro e che abbia i Flussi del progetto.
+ */
+export class ServerEstraneo extends Error {
+  constructor(
+    /** I Flussi del progetto che il server non ha. */
+    readonly mancanti: readonly string[],
+    /** Gli stream che il server ha invece. */
+    readonly suoi: readonly string[],
+  ) {
+    super(
+      `il server audio che risponde non e il nostro: non ha i Flussi ` +
+        `${elenca(mancanti)}` +
+        (suoi.length > 0 ? ` (ha ${elenca(suoi)})` : ' (non ha nessuno stream)'),
+    )
+    this.name = 'ServerEstraneo'
+  }
+}
+
+function elenca(nomi: readonly string[]): string {
+  return nomi
+    .slice(0, 3)
+    .map((n) => `"${n}"`)
+    .join(', ') + (nomi.length > 3 ? '…' : '')
+}
+
 /** Millisecondi fra un tentativo di riconnessione RPC e il successivo. */
 const RIPROVA_RPC_MS = 2000
 /**
@@ -103,6 +141,11 @@ export class SupervisoreSnapcast extends EventEmitter {
   private fermatoDaNoi = false
   private chiuso = false
   private ipFlussi: string | null = null
+  /**
+   * L'ultimo motivo per cui la riconnessione ha rifiutato il server che
+   * rispondeva: si scrive nel Diario una volta, non ogni due secondi.
+   */
+  private ultimoRifiuto: string | null = null
 
   constructor(private readonly opzioni: OpzioniSupervisore) {
     super()
@@ -164,32 +207,31 @@ export class SupervisoreSnapcast extends EventEmitter {
    * "Stream not found" per tutta la serata, perche gli stream li crea il file
    * di configurazione e quello e il suo. Se gli stream non sono i nostri non
    * si adotta: `avvia()` fara il suo lavoro, e dira anche di chi e la colpa.
+   *
+   * Il controllo sta dentro `collegaEVerifica`, non qui: e la stessa domanda
+   * che va fatta **ogni** volta che ci si collega, anche dopo un avvio e dopo
+   * una caduta. Qui si decide solo cosa dirne.
    */
   async adotta(): Promise<boolean> {
     try {
       await this.collegaEVerifica(false)
-      const nostri = generaConfigurazione(this.opzioni.progetto()).flussi.map((f) => f.id)
-      const suoi = new Set(this.osservato.streamIds)
-      const mancanti = nostri.filter((id) => !suoi.has(id))
-      if (mancanti.length > 0) {
-        this.opzioni.suDiario(
-          'attenzione',
-          `C'e gia un server audio acceso, ma non e il nostro: non ha i Flussi ` +
-            `${mancanti.slice(0, 3).join(', ')}${mancanti.length > 3 ? '…' : ''}. ` +
-            'Non lo adotto: avviero il nostro.',
-        )
-        // `collegaEVerifica` si era gia dichiarato acceso: qui non lo siamo,
-        // e lasciarlo cosi farebbe saltare l'`avvia()` che viene dopo.
-        this.situazione = 'spento'
-        throw new Error('il server acceso non ha i Flussi di questo progetto')
-      }
       // E nostro: adesso si puo riconciliare, cosa che `collegaEVerifica` non
       // ha fatto apposta.
       void this.riconcilia('appena adottato')
       this.avviaBattito()
       await this.apriPonte()
       return true
-    } catch {
+    } catch (e) {
+      if (e instanceof ServerEstraneo) {
+        // Il colpevole si nomina gia qui, all'avvio di Regia, e non solo
+        // quando l'Operatore prova ad accendere: e il momento in cui ha
+        // ancora tempo per fermare il servizio prima della serata.
+        this.opzioni.suDiario(
+          'attenzione',
+          `C'e gia un server audio acceso, ma ${e.message}. Non lo adotto` +
+            (await this.colpaDiUnAltroServer(this.sede())),
+        )
+      }
       // Non si tocca `situazione`: qui si sta solo guardando se c'era gia
       // qualcosa, e nel frattempo un `avvia()` potrebbe averla gia decisa.
       await this.rpc.chiudi().catch(() => {})
@@ -267,9 +309,16 @@ export class SupervisoreSnapcast extends EventEmitter {
     //    *tutta* la catena, `mkdir` compreso: la shell esce subito dopo e non
     //    succede niente, riportando successo. Sintomo: nessun errore, nessun
     //    log, nessun server.
-    // 3. Si **verifica**. Un `echo avviato` dice solo che la shell e arrivata
-    //    in fondo. `pgrep` dice che snapserver c'e, e se non c'e si porta
+    // 3. Si **verifica**, ma solo che il processo esista. Un `echo avviato`
+    //    dice solo che la shell e arrivata in fondo; `pgrep` dice che un
+    //    snapserver **nostro** c'e -- `-u` lo limita all'utente che lo ha
+    //    lanciato, cosi un `snapserver.service` di sistema, che gira sotto un
+    //    altro utente, non passa per il nostro -- e se non c'e si porta
     //    indietro il suo log invece di lasciare all'Operatore un "non risponde".
+    //    ⚠️ Che il processo esista **non prova che ascolti**: snapserver 0.35
+    //    scrive `bind: Address already in use` e continua a girare con le sole
+    //    sorgenti (misurato, 18 settembre 2026). La prova vera la da
+    //    `aspettaControllo`, che vuole vedere i nostri Flussi.
     const avvio = await sede.esegui(
       [
         `mkdir -p ${sede.cartellaLavoro} ${sede.datadir}`,
@@ -277,7 +326,7 @@ export class SupervisoreSnapcast extends EventEmitter {
           `> ${sede.cartellaLavoro}/server.log 2>&1 < /dev/null &`,
         'disown',
         'sleep 1',
-        'if pgrep -x snapserver > /dev/null; then echo avviato; else',
+        'if pgrep -x -u "$(id -u)" snapserver > /dev/null; then echo avviato; else',
         `  echo "non partito"; tail -20 ${sede.cartellaLavoro}/server.log 2>&1; exit 1`,
         'fi',
       ].join('\n'),
@@ -291,7 +340,32 @@ export class SupervisoreSnapcast extends EventEmitter {
       )
     }
 
-    await this.aspettaControllo(15_000)
+    try {
+      await this.aspettaControllo(15_000)
+    } catch (e) {
+      if (!(e instanceof ServerEstraneo)) throw e
+      // Il nostro processo c'e, ma sulla porta di controllo risponde un altro:
+      // le porte sono sue, e il nostro sta girando sordo, con le sole sorgenti
+      // aperte. Lasciarlo li vorrebbe dire scrittori "attivi" su un server che
+      // nessun telefono puo raggiungere. Si spegne -- e nostro, il `pkill` lo
+      // tocca -- e si dice all'Operatore di chi sono le porte.
+      await sede.esegui('pkill -x snapserver || true')
+      const s = p.server
+      const dalLog = await sede
+        .esegui(
+          `grep -i -m 1 "already in use" ${sede.cartellaLavoro}/server.log 2>/dev/null || true`,
+          { timeoutMs: 5000 },
+        )
+        .catch(() => null)
+      this.situazione = 'caduto'
+      throw new Error(
+        `snapserver e partito ma ${e.message}: le porte ${s.portaFlussoClient}, ` +
+          `${s.portaControllo} e ${s.portaHttp} le tiene un altro server audio, e il nostro ` +
+          `non ha potuto aprirle. L'ho spento` +
+          (dalLog?.uscita ? ` (dal suo log: "${dalLog.uscita.trim().slice(-160)}")` : '') +
+          (await this.colpaDiUnAltroServer(sede)),
+      )
+    }
     this.avviaBattito()
     await this.apriPonte()
     this.opzioni.suDiario(
@@ -516,8 +590,8 @@ export class SupervisoreSnapcast extends EventEmitter {
     if (!r || !/^active$/m.test(r.uscita.trim())) return ''
     return (
       '. Attenzione: su questa macchina c\'e un servizio "snapserver" gia attivo ' +
-      '(systemd), che tiene le porte e non e nostro: fermalo con ' +
-      '"sudo systemctl stop snapserver", e disabilitalo se non lo vuoi al prossimo avvio.'
+      '(systemd), che tiene le porte, non e nostro e riparte da solo a ogni avvio del PC: ' +
+      'fermalo e disabilitalo con "sudo systemctl disable --now snapserver", poi premi Avvia.'
     )
   }
 
@@ -538,8 +612,30 @@ export class SupervisoreSnapcast extends EventEmitter {
    *   fallita" nel Diario per una cosa che abbiamo voluto noi.
    */
   private async collegaEVerifica(poiRiconcilia = true): Promise<void> {
-    await this.rpc.collega()
-    this.osservato = await this.rpc.stato()
+    const p = this.opzioni.progetto()
+    await this.rpc.collega({ porta: p.server.portaControllo })
+    const osservato = await this.rpc.stato()
+
+    // Risponde: ma **chi**? Un snapserver estraneo -- il `snapserver.service`
+    // di una distribuzione, uno acceso a mano -- risponde a `Server.GetStatus`
+    // esattamente come il nostro. Se non ha i Flussi del progetto non e il
+    // nostro, e non ci si dichiara accesi: si dichiarerebbe "acceso" un server
+    // in cui i telefoni finiscono su uno stream che nessuno scrive.
+    //
+    // Si guarda prima di toccare `osservato` e `vivi`, apposta: i client di un
+    // server estraneo non devono comparire come Altoparlanti -- e
+    // `aggiornaVivi` li presenterebbe al motore come nuovi, che li
+    // aggiungerebbe al progetto.
+    const nostri = generaConfigurazione(p).flussi.map((f) => f.id)
+    const suoi = new Set(osservato.streamIds)
+    const mancanti = nostri.filter((id) => !suoi.has(id))
+    if (mancanti.length > 0) {
+      await this.rpc.chiudi().catch(() => {})
+      throw new ServerEstraneo(mancanti, osservato.streamIds)
+    }
+
+    this.ultimoRifiuto = null
+    this.osservato = osservato
     this.aggiornaVivi()
     this.situazione = 'acceso'
     this.opzioni.suDiario(
@@ -566,7 +662,14 @@ export class SupervisoreSnapcast extends EventEmitter {
     if (this.riprova || this.chiuso) return
     this.riprova = setTimeout(() => {
       this.riprova = null
-      this.collegaEVerifica().catch(async () => {
+      this.collegaEVerifica().catch(async (e: Error) => {
+        // Un server estraneo che risponde al posto del nostro si dice una
+        // volta, non ogni due secondi: la riprova continua lo stesso, perche
+        // il nostro potrebbe tornare quando quello se ne va.
+        if (e instanceof ServerEstraneo && e.message !== this.ultimoRifiuto) {
+          this.ultimoRifiuto = e.message
+          this.opzioni.suDiario('attenzione', `Sulla porta di controllo ${e.message}.`)
+        }
         await this.rpc.chiudi().catch(() => {})
         this.programmaRiprova()
       })
@@ -605,6 +708,10 @@ export class SupervisoreSnapcast extends EventEmitter {
         await this.collegaEVerifica()
         return
       } catch (e) {
+        // Risponde un altro server: aspettare non lo fara diventare il nostro,
+        // e le porte che tiene lui il nostro non le aprira mai. Si esce
+        // subito, e `avvia()` decide cosa dirne.
+        if (e instanceof ServerEstraneo) throw e
         ultimo = e as Error
         // Una connessione aperta su qualcosa che non risponde va chiusa, o al
         // giro dopo `collega()` la considera buona e non riprova nemmeno.

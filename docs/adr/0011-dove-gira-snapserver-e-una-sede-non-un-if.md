@@ -231,3 +231,45 @@ quel file, e ci resta per una ragione nominata caso per caso.
 I test continuano a girare su una Sede finta, apposta perché non dipendano dalla macchina che li
 esegue: dicono che il supervisore si comporta come deve dato un certo esito dei comandi, non che
 quei comandi facciano quello sulla Sede vera. Resta il loro mestiere, ed è un altro.
+
+## Correzione (18 settembre 2026): un server estraneo non fa fallire l'avvio, lo fa «riuscire»
+
+Il paragrafo sul `pkill` qui sopra dice che «quando l'avvio fallisce il supervisore chiede chi
+tiene la porta». Poggiava su un'assunzione mai misurata: che snapserver, non potendo aprire le
+sue porte, **esca**. Sulla macchina del committente — Ubuntu 26.04, `snapserver.service`
+abilitato — si è visto che non esce: la 0.35 scrive `bind: Address already in use` per 1704,
+1705 e 1780 e **continua a girare** con le sole sorgenti dei Flussi aperte. Il `pgrep` lo
+trovava vivo, l'avvio «riusciva», e sulla porta di controllo rispondeva il server di sistema:
+Regia si dichiarava `acceso`, scriveva «Stream not found» ogni cinque secondi e il telefono
+finiva in uno stream che nessuno scrive. È esattamente la serata che l'ADR voleva evitare, e il
+controllo di `adotta()` — che c'era ed era giusto — non bastava, perché `avvia()` non ci passava.
+
+Tre cose cambiano, e la prima è la decisione vera.
+
+**La prova che il server sulla porta di controllo è il nostro è che abbia i Flussi del
+progetto, e la si fa a ogni collegamento.** Non «il processo esiste» (`pgrep`), non «risponde a
+`Server.GetStatus`» (risponde anche quello di sistema), non «il log non ha errori». Il controllo
+sta dentro `collegaEVerifica()`, prima di toccare `osservato`, `vivi` e `situazione`, e fallisce
+con un errore che ha un nome — `ServerEstraneo` — perché chi lo riceve deve poterlo distinguere
+da «non risponde nessuno»: a un server che non risponde si riprova, a un server estraneo no.
+`adotta()` diventa un chiamante come gli altri, e la sua clausola «non ha i Flussi» sparisce da
+lì perché vale ovunque.
+
+**Quando dopo l'avvio risponde un altro, il nostro si spegne.** Lasciarlo vivo vorrebbe dire
+scrittori `attivo` su un server sordo, che è una bugia più fine della precedente. È nostro, il
+`pkill` lo tocca; poi il messaggio dice quali porte tiene chi, riporta la riga `Address already
+in use` dal log, e — se `systemctl is-active snapserver` risponde `active` — nomina il servizio e
+il comando che lo toglie di mezzo, `sudo systemctl disable --now snapserver`. Lo stesso nome del
+colpevole compare già all'avvio di Regia, quando `adotta()` lo incontra: è il momento in cui
+l'Operatore ha ancora il pomeriggio davanti. Il `pgrep` dell'avvio si limita ai processi
+dell'utente (`-u "$(id -u)"`), così un servizio sotto un altro utente non passa nemmeno per
+«avviato»; resta un controllo di esistenza, non di identità.
+
+**Il client RPC segue `portaControllo`.** Parlava a `127.0.0.1:1705` fisso mentre il file di
+configurazione seguiva l'impostazione: cambiare la porta in Impostazioni avrebbe fatto parlare
+Regia con un'altra porta, e cioè con chiunque ci ascoltasse. Non c'entra con il servizio di
+sistema, ma è saltato fuori provando a far convivere il nostro server con quello.
+
+Il rischio accettato più sopra — il `pkill` che spegne un snapserver acceso a mano dallo stesso
+utente — resta com'era. Le misure stanno in `docs/fatti-verificati.md`, sezione «Su una Ubuntu
+vera, 18 settembre 2026».

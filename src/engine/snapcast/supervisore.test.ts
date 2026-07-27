@@ -13,11 +13,17 @@
  * Linux con snapserver nel PATH il primo test avvierebbe un server vero.
  */
 import assert from 'node:assert/strict'
+import { createServer, type Server } from 'node:net'
 import { describe, it } from 'node:test'
 
-import { progettoVuoto } from '../dominio/progetto.js'
+import { progettoVuoto, type Progetto } from '../dominio/progetto.js'
 import type { EsitoSede, MotivoIndisponibile, Sede, SnapserverTrovato } from './sede.js'
-import { FLUSSO_NON_ASSEGNATI, SupervisoreSnapcast, chiaveFlussoDi } from './supervisore.js'
+import {
+  FLUSSO_NON_ASSEGNATI,
+  ServerEstraneo,
+  SupervisoreSnapcast,
+  chiaveFlussoDi,
+} from './supervisore.js'
 
 /** Una Sede che non c'e, o che c'e ma e vuota. */
 function sedeFinta(parti: Partial<Sede> = {}): Sede {
@@ -157,6 +163,222 @@ describe('una riconfigurazione che non riesce a ripartire', () => {
       `nel Diario manca la riga grave: ${JSON.stringify(righe)}`,
     )
     await s.chiudi()
+  })
+})
+
+/**
+ * Un snapserver finto sulla porta di controllo: risponde a `Server.GetStatus`
+ * con gli stream che gli si dicono, e con un "ok" vuoto a tutto il resto.
+ *
+ * E un server vero su una porta vera, presa a caso, perche cio che si vuole
+ * provare e proprio il tratto che il supervisore non puo fingere: **chi** c'e
+ * dall'altra parte della 1705. Un `snapserver.service` di sistema risponde a
+ * `Server.GetStatus` esattamente come il nostro, e la sola differenza sta
+ * negli stream che dichiara.
+ */
+interface SnapserverFinto {
+  readonly porta: number
+  readonly metodi: string[]
+  chiudi(): Promise<void>
+}
+
+function snapserverFinto(
+  streamIds: readonly string[],
+  clienti: readonly { id: string; nome: string }[] = [],
+): Promise<SnapserverFinto> {
+  const metodi: string[] = []
+  const server: Server = createServer((socket) => {
+    let resto = ''
+    socket.on('data', (d) => {
+      resto += d.toString('utf8')
+      let taglio: number
+      while ((taglio = resto.indexOf('\n')) >= 0) {
+        const riga = resto.slice(0, taglio)
+        resto = resto.slice(taglio + 1)
+        if (!riga.trim()) continue
+        const m = JSON.parse(riga) as { id: number; method: string }
+        metodi.push(m.method)
+        const result =
+          m.method === 'Server.GetStatus'
+            ? {
+                server: {
+                  groups:
+                    clienti.length === 0
+                      ? []
+                      : [
+                          {
+                            id: 'g1',
+                            stream_id: streamIds[0] ?? '',
+                            clients: clienti.map((c) => ({
+                              id: c.id,
+                              connected: true,
+                              host: { ip: '192.0.2.7', name: c.nome },
+                              config: {
+                                name: c.nome,
+                                latency: 0,
+                                volume: { muted: false, percent: 100 },
+                              },
+                            })),
+                          },
+                        ],
+                  streams: streamIds.map((id) => ({ id })),
+                },
+              }
+            : {}
+        socket.write(JSON.stringify({ id: m.id, jsonrpc: '2.0', result }) + '\n')
+      }
+    })
+    socket.on('error', () => {})
+  })
+  return new Promise((risolvi) => {
+    server.listen(0, '127.0.0.1', () => {
+      const porta = (server.address() as { port: number }).port
+      risolvi({
+        porta,
+        metodi,
+        chiudi: () => new Promise((ok) => server.close(() => ok())),
+      })
+    })
+  })
+}
+
+/** Una Sede in cui "avviare snapserver" riesce sempre, e che ricorda i comandi. */
+function sedeCheAvvia(opzioni: { servizioAttivo: boolean }): Sede & { comandi: string[] } {
+  const comandi: string[] = []
+  const ok: EsitoSede = { stato: 0, uscita: '', errore: '' }
+  return {
+    ...sedeFinta({
+      snapserver: async () => ({ percorso: '/usr/local/bin/snapserver', versione: '0.35.0' }),
+      scrivi: async () => ok,
+      esegui: async (comando: string): Promise<EsitoSede> => {
+        comandi.push(comando)
+        if (comando.includes('pgrep')) return { ...ok, uscita: 'avviato' }
+        if (comando.includes('is-active')) {
+          return { ...ok, uscita: opzioni.servizioAttivo ? 'active' : 'inactive' }
+        }
+        if (comando.includes('already in use')) {
+          return { ...ok, uscita: '[Error] (ControlServer) bind: Address already in use' }
+        }
+        return ok
+      },
+    }),
+    comandi,
+  }
+}
+
+function supervisoreSu(
+  sede: Sede,
+  porta: number,
+  righe: { livello: string; testo: string }[] = [],
+  nuovi: string[] = [],
+): SupervisoreSnapcast {
+  const progetto: Progetto = {
+    ...progettoVuoto('C:/Video'),
+    server: { ...progettoVuoto('C:/Video').server, portaControllo: porta },
+  }
+  return new SupervisoreSnapcast({
+    progetto: () => progetto,
+    suDiario: (livello, testo) => righe.push({ livello, testo }),
+    suClientNuovo: (id) => nuovi.push(id),
+    suonaIdentifica: () => 600,
+    suIndirizzoFlussi: () => {},
+    sede: () => sede,
+  })
+}
+
+describe('supervisore: il server che risponde deve essere il nostro', () => {
+  /**
+   * Il caso misurato il 18 settembre 2026 su una Ubuntu vera: con
+   * `snapserver.service` di sistema acceso, il nostro parte lo stesso, sordo
+   * su 1704/1705/1780, e `pgrep` lo trova. Sulla porta di controllo risponde
+   * quello di sistema, con il suo stream `default`. Prima di questo test il
+   * supervisore si dichiarava acceso, riempiva il Diario di "Stream not
+   * found" e i telefoni finivano su uno stream che nessuno scrive.
+   */
+  it('non si dichiara acceso su un server che non ha i nostri Flussi', async () => {
+    const finto = await snapserverFinto(['default'])
+    const sede = sedeCheAvvia({ servizioAttivo: true })
+    const righe: { livello: string; testo: string }[] = []
+    const s = supervisoreSu(sede, finto.porta, righe)
+    try {
+      await assert.rejects(
+        () => s.avvia(),
+        (e: Error) => {
+          assert.match(e.message, /non e il nostro/)
+          assert.match(e.message, /"Non assegnati"/)
+          // Il colpevole, per nome, e il comando per toglierlo di mezzo.
+          assert.match(e.message, /systemctl disable --now snapserver/)
+          // La riga del log che spiega perche il nostro non ascolta.
+          assert.match(e.message, /already in use/)
+          return true
+        },
+      )
+      assert.equal(s.stato(), 'caduto')
+      assert.ok(
+        !righe.some((r) => /Server audio acceso/.test(r.testo)),
+        `il Diario dice acceso: ${JSON.stringify(righe)}`,
+      )
+      // Il nostro processo sordo va spento: un `pkill` **dopo** l'avvio, oltre
+      // a quello di prima.
+      const pkill = sede.comandi.filter((c) => c.includes('pkill'))
+      assert.equal(pkill.length, 2, `pkill attesi 2, trovati ${pkill.length}`)
+      // I due `pkill` sono la stessa stringa: si guarda l'ultima occorrenza.
+      assert.ok(
+        sede.comandi.lastIndexOf(pkill[1]!) > sede.comandi.findIndex((c) => c.includes('setsid')),
+        `ordine dei comandi: ${JSON.stringify(sede.comandi.map((c) => c.split('\n')[0]))}`,
+      )
+      // Non si e riconciliato contro il server estraneo.
+      assert.ok(!finto.metodi.includes('Group.SetStream'), finto.metodi.join(','))
+    } finally {
+      await s.chiudi()
+      await finto.chiudi()
+    }
+  })
+
+  it('adotta() rifiuta un server estraneo e non si porta dietro i suoi client', async () => {
+    const finto = await snapserverFinto(['default'], [{ id: 'telefono-di-altri', nome: 'Pixel' }])
+    const sede = sedeCheAvvia({ servizioAttivo: false })
+    const righe: { livello: string; testo: string }[] = []
+    const nuovi: string[] = []
+    const s = supervisoreSu(sede, finto.porta, righe, nuovi)
+    try {
+      assert.equal(await s.adotta(), false)
+      assert.equal(s.stato(), 'spento')
+      // I client di un server che non e nostro non sono Altoparlanti: prima
+      // comparivano nell'interfaccia, con l'indirizzo, a server "spento".
+      assert.equal(s.clienti().size, 0)
+      assert.deepEqual(nuovi, [])
+      assert.ok(righe.some((r) => /non e il nostro/.test(r.testo)), JSON.stringify(righe))
+      // Senza un servizio attivo non si inventa un colpevole.
+      assert.ok(!righe.some((r) => /systemctl/.test(r.testo)), JSON.stringify(righe))
+    } finally {
+      await s.chiudi()
+      await finto.chiudi()
+    }
+  })
+
+  it('si dichiara acceso solo dopo aver visto i propri Flussi, sulla porta del progetto', async () => {
+    const finto = await snapserverFinto(['Non assegnati'])
+    const sede = sedeCheAvvia({ servizioAttivo: false })
+    const righe: { livello: string; testo: string }[] = []
+    const s = supervisoreSu(sede, finto.porta, righe)
+    try {
+      assert.notEqual(finto.porta, 1705)
+      await s.avvia()
+      assert.equal(s.stato(), 'acceso')
+      assert.ok(righe.some((r) => /Server audio acceso/.test(r.testo)), JSON.stringify(righe))
+      assert.equal(sede.comandi.filter((c) => c.includes('pkill')).length, 1)
+    } finally {
+      await s.chiudi()
+      await finto.chiudi()
+    }
+  })
+
+  it('ServerEstraneo dice cosa manca e cosa c e', () => {
+    const e = new ServerEstraneo(['Ingresso', 'Non assegnati'], ['default'])
+    assert.match(e.message, /"Ingresso", "Non assegnati"/)
+    assert.match(e.message, /ha "default"/)
+    assert.equal(e.name, 'ServerEstraneo')
   })
 })
 

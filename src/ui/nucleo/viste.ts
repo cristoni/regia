@@ -298,7 +298,15 @@ export function righeAmbiente(stato: Stato): Salute[] {
         `Porte gia occupate: ${a.porteOccupate.join(', ')}. ` +
         (nostre
           ? 'Il server audio e acceso: sono quasi certamente le sue. Non c\'e niente da fare.'
-          : 'Se e il server audio di una sessione precedente va bene; altrimenti qualcosa le sta usando.'),
+          : 'Se e il server audio di una sessione precedente va bene; altrimenti qualcosa le sta usando' +
+            // Su Linux il "qualcosa" ha quasi sempre un nome: il servizio
+            // snapserver che molte distribuzioni installano e avviano da soli.
+            // Regia lo nomina anche quando prova ad accendere il suo; qui lo
+            // si anticipa, perche e la riga che l'Operatore legge per prima.
+            (a.piattaforma === 'linux'
+              ? ' -- su Linux di solito un servizio "snapserver" di sistema, che si toglie con ' +
+                '"sudo systemctl disable --now snapserver".'
+              : '.')),
     })
   }
 

@@ -31,7 +31,10 @@ fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
 ## Comandi
 
 ```bash
-npm test                      # 256 test. Concorrenza 1: ogni motore avvia un thread audio
+npm test                      # 260 test; 5 si saltano senza ffprobe nel PATH (registrazione). Il
+                              # resto usa l'ffmpeg di vendor/. Concorrenza 1: ogni motore avvia un
+                              # thread audio. Su Linux NON deve esserci uno snapserver vivo su 1705,
+                              # nemmeno orfano: la suite non esce (fatti verificati, 18 settembre)
 npm run typecheck             # engine, shell, interfaccia, test dell'interfaccia
 npm run build                 # interfaccia + motore + guscio
 npm run dev                   # compila l'interfaccia e avvia Regia senza finestra, su :7333
@@ -209,8 +212,11 @@ si aggiunge un ADR. Quando si misura qualcosa, si aggiunge una riga ai fatti ver
   Quindi il `datadir` viene dalla Sede (`/var/lib/snapserver` è dell'utente di sistema
   `snapserver`, a 0750) e la cartella di lavoro sta in `XDG_RUNTIME_DIR`; e il `pkill -x
   snapserver` **non tocca** un `snapserver.service` che gira sotto un altro utente e tiene le
-  porte — quando l'avvio fallisce il supervisore lo dice per nome, chiedendolo a `systemctl
-  is-active`.
+  porte. **Con quel servizio attivo il nostro snapserver parte lo stesso, sordo**: la 0.35 scrive
+  `Address already in use` e continua con le sole sorgenti (misurato il 18 settembre 2026).
+  Quindi la prova che il server sulla porta di controllo è il nostro non è `pgrep` ma **che abbia
+  i Flussi del progetto** (`ServerEstraneo` in `collegaEVerifica`); quando non li ha, il
+  supervisore spegne il suo e nomina il servizio per nome, chiedendolo a `systemctl is-active`.
 - **Uno stream `idle` non vuol dire che non arrivano byte: vuol dire che arriva silenzio.** A casa
   vuota tutti gli stream sono `idle` ed è giusto così. Il criterio «passano a `playing`» vale
   mentre si suona qualcosa.

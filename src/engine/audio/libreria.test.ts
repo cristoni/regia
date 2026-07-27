@@ -16,14 +16,19 @@ import * as path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 
 import { progettoVuoto, type ImpostazioniAudio, type Suono } from '../dominio/progetto.js'
+import { trovaFfmpeg } from '../media/ffmpeg.js'
 import { ErroreDecodifica, LibreriaSuoni } from './libreria.js'
 
 const AUDIO: ImpostazioniAudio = progettoVuoto('x').audio
 const cartelle: string[] = []
+// Lo stesso binario che usa il motore: quello in bundle se c'e, altrimenti il
+// PATH. Cercare solo nel PATH saltava questi test proprio sulla macchina dove
+// contano di piu, quella con ffmpeg soltanto in `vendor/`.
+const FFMPEG = trovaFfmpeg()?.percorso ?? 'ffmpeg'
 let disponibileFfmpeg = false
 
 before(() => {
-  disponibileFfmpeg = spawnSync('ffmpeg', ['-version'], { windowsHide: true }).status === 0
+  disponibileFfmpeg = spawnSync(FFMPEG, ['-version'], { windowsHide: true }).status === 0
 })
 after(async () => {
   for (const d of cartelle) await fs.rm(d, { recursive: true, force: true })
@@ -35,13 +40,13 @@ async function ambiente() {
   const suoni = path.join(radice, 'suoni')
   const cache = path.join(radice, 'cache')
   await fs.mkdir(suoni, { recursive: true })
-  return { radice, suoni, cache, libreria: new LibreriaSuoni(suoni, cache) }
+  return { radice, suoni, cache, libreria: new LibreriaSuoni(suoni, cache, FFMPEG) }
 }
 
 /** Genera un vero file audio con ffmpeg: un tono di durata nota. */
 function generaTono(destinazione: string, secondi: number, hz = 440): void {
   const esito = spawnSync(
-    'ffmpeg',
+    FFMPEG,
     ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
      '-i', `sine=frequency=${hz}:duration=${secondi}`, '-y', destinazione],
     { windowsHide: true },
