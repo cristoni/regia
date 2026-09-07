@@ -39,3 +39,31 @@ facile del protocollo — il server timbra e rimanda, la matematica sta nel clie
 Scartata perché Snapdroid è anche un controller JSON-RPC e una scatola nera che si aggiorna
 per conto suo: un suo aggiornamento potrebbe rompere il nostro server durante la stagione.
 Il livello audio resta comunque dietro un'interfaccia, quindi la strada non è murata.
+
+---
+
+## Correzione, dopo la ricerca tecnica
+
+**Una promessa di questo ADR non e mantenibile cosi com'e scritta.**
+
+Tutte le misure di rete sono state prese su questa macchina, dove `networkingMode=mirrored` era
+**gia impostato prima** di iniziare — non e un default, e configurazione preesistente. Un
+Windows 11 di fabbrica usa **NAT**, dove una porta in ascolto dentro la distro non e raggiungibile
+dalla LAN senza `netsh portproxy` piu una regola firewall, entrambi con privilegi elevati.
+
+Il problema e che `networkingMode` si imposta in `%USERPROFILE%\.wslconfig`, che vale **per
+utente e per tutte le distro del PC**. Quindi la frase "nessun contatto con le distro gia presenti
+sul PC" e falsa: per funzionare, Regia deve toccare una configurazione condivisa.
+
+Restano tre strade, e la scelta va fatta con il telefono in mano, non a tavolino:
+
+1. **Scrivere `.wslconfig`**, dopo aver mostrato all'utente che cosa cambia e per quali distro, e
+   con la possibilita di rimetterlo com'era. Onesto, ma cambia una impostazione globale del PC e
+   richiede un `wsl --shutdown` che ferma anche le altre distro.
+2. **Restare in NAT e aprire un ponte da Windows**: `netsh interface portproxy` sulle porte 1704,
+   1705, 1780 piu le regole firewall. Non tocca nessuna distro, ma aggiunge un pezzo di
+   configurazione di rete di Windows che va creato, verificato e rimosso.
+3. **Fare il ponte dentro Regia**: il motore ascolta sulla LAN e inoltra verso la distro. Nessuna
+   configurazione di sistema, ma tutto il traffico audio dei telefoni passa dal nostro processo.
+
+Nessuna e gratis. **La misura 1 di `docs/fatti-verificati.md` decide quale.**

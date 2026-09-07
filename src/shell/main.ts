@@ -1,0 +1,107 @@
+/**
+ * Il guscio Electron.
+ *
+ * Deliberatamente stupido. Tutta Regia sta nel motore, che non importa niente
+ * di Electron; qui dentro c'e solo cio che serve ad avere una finestra: avvia
+ * il motore in processo, apri l'indirizzo che ti dice, e non metterti in mezzo.
+ *
+ * Se un giorno questo file sparisse, Regia continuerebbe a funzionare con un
+ * browser puntato sulla stessa porta. E il motivo per cui il tablet della Fase 3
+ * costa quasi zero.
+ */
+import { app, BrowserWindow, globalShortcut, Menu, shell } from 'electron'
+
+import { avviaMotore, type MotoreAvviato } from '../engine/index.js'
+
+let motore: MotoreAvviato | null = null
+let finestra: BrowserWindow | null = null
+
+/** Una sola Regia per volta: due mixer sulle stesse porte non funzionerebbero. */
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!finestra) return
+    if (finestra.isMinimized()) finestra.restore()
+    finestra.focus()
+  })
+  void principale()
+}
+
+async function principale(): Promise<void> {
+  await app.whenReady()
+  Menu.setApplicationMenu(null)
+
+  motore = await avviaMotore()
+
+  finestra = new BrowserWindow({
+    width: 1600,
+    height: 950,
+    minWidth: 1024,
+    minHeight: 640,
+    show: false,
+    // Tema scuro obbligatorio (§5.1): la Regia sta in una stanza buia, e un
+    // lampo bianco all'avvio acceca l'Operatore per mezzo minuto.
+    backgroundColor: '#0b0b0d',
+    autoHideMenuBar: true,
+    webPreferences: {
+      // La pagina e servita dal nostro motore su loopback e non ha bisogno di
+      // toccare Node: se un giorno mostrasse contenuto di terzi, questo confine
+      // e cio che impedisce il disastro.
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+
+  finestra.once('ready-to-show', () => finestra?.show())
+  finestra.on('closed', () => (finestra = null))
+
+  // Un link esterno apre il browser di sistema invece di dirottare la Regia.
+  finestra.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  await finestra.loadURL(motore.indirizzo)
+
+  // F11 schermo intero, F12 strumenti di sviluppo. Le scorciatoie dei Suoni e
+  // lo STOP TUTTO stanno nella pagina, non qui: devono funzionare anche dal
+  // tablet, dove questo file non esiste.
+  finestra.webContents.on('before-input-event', (evento, input) => {
+    if (input.type !== 'keyDown' || !finestra) return
+    if (input.key === 'F11') {
+      finestra.setFullScreen(!finestra.isFullScreen())
+      evento.preventDefault()
+    } else if (input.key === 'F12') {
+      finestra.webContents.toggleDevTools()
+      evento.preventDefault()
+    }
+  })
+}
+
+app.on('window-all-closed', () => app.quit())
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll()
+})
+
+/**
+ * La chiusura deve essere ordinata: i file di registrazione vanno chiusi bene o
+ * restano illeggibili (§3.7), e l'ultima modifica del progetto va scritta.
+ * Electron non aspetta le promesse, quindi si rimanda l'uscita finche il motore
+ * non ha finito.
+ */
+let inChiusura = false
+app.on('before-quit', (evento) => {
+  if (inChiusura || !motore) return
+  evento.preventDefault()
+  inChiusura = true
+  void motore
+    .ferma()
+    .catch((e: unknown) => console.error('chiusura non pulita:', e))
+    .finally(() => {
+      motore = null
+      app.quit()
+    })
+})

@@ -47,3 +47,34 @@ stessa stanza produrrebbero flanging. Il modello per Zona garantisce la sincroni
 
 Conseguenze da gestire: i gruppi vuoti spariscono da `Server.GetStatus` e vanno ricreati, e
 l'appartenenza ai gruppi va riconciliata e non solo lo stream.
+
+---
+
+## Correzioni, dopo la ricerca tecnica
+
+**Lo stream in piu serve ai non assegnati, non a Identifica.** Sopra c'era scritto "piu una per
+Identifica": e sbagliato, perche [ADR 0006](0006-identifica-zittendo-gli-altri.md) ha stabilito che
+Identifica non sposta mai un client. Lo stream aggiuntivo e quello del gruppo **"non assegnati"**.
+
+**E ha bisogno di un mixer vivo come tutti gli altri.** Non per lo stato dello stream, ma per un
+motivo meno ovvio: snapserver legge la sorgente con una `async_read` che aspetta un blocco intero.
+Se su quella socket non si scrive mai, la lettura resta **pendente**; e quando Identifica finalmente
+ci scrive dentro, quella lettura si completa con un riferimento temporale vecchio di minuti, e
+produce una risincronizzazione enorme **sul gruppo che contiene tutti i telefoni non ancora
+assegnati**. Con il meccanismo dell'ADR 0006 succederebbe decine di volte per ogni Setup.
+
+Quindi: **tredici mixer e tredici socket per dodici Zone**, tutti che scrivono senza interruzione
+dal primo istante. Il silenzio del gruppo "non assegnati" e silenzio *prodotto*, esattamente come
+quello di una Zona ferma.
+
+**Le porte vanno verificate prima di avviare.** `Server::start()` rilancia l'eccezione: una sola
+porta occupata fra le tredici impedisce l'avvio dell'**intero** server, e l'errore visibile e un
+opaco `Invalid argument`. Il generatore di configurazione controlla le porte e dice quale.
+
+**L'host delle sorgenti deve essere un IP numerico**, non `localhost`: finisce in
+`make_address()`, che lancia sui nomi. Il §2.2 del documento di progetto aveva ragione a
+diffidare di `localhost`, ma per un motivo diverso da quello che immaginava.
+
+**L'API JSON-RPC va ri-verificata contro la 0.35** prima di scrivere il riconciliatore: quella
+studiata finora e la 0.27 di apt, e la 0.35 dichiara `major 23` con il commento "backwards
+incompatible change".

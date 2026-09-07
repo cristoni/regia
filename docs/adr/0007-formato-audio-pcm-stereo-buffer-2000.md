@@ -31,3 +31,31 @@ Due ottimizzazioni restano aperte, da **misurare** con i telefoni veri e non da 
 - **Mono** (`44100:16:1`): dimezza la banda, e per un urlo da una cassa amplificata in una stanza
   buia lo stereo non serve. Rischio da verificare: il telefono è collegato alla cassa con un jack,
   e un flusso mono su un cavo stereo può finire su un canale solo.
+
+---
+
+## Correzioni, dopo la ricerca tecnica
+
+**L'anticipo di scrittura si somma al `buffer`.** Non era stato collegato da nessuno. Snapserver
+data i blocchi quando li **legge**, quindi l'audio fermo nella coda della socket ritarda il proprio
+timestamp: la latenza dal pulsante al suono e `buffer + anticipo`. Con 2000 + 200 sono 2,2 s; con
+un anticipo da 1 s diventano 3,2 s e il criterio §8.3, gia riscritto una volta, salterebbe di nuovo.
+
+**L'anticipo e quindi un parametro di latenza, non solo di robustezza.** Va tenuto al minimo che
+regge, e il minimo si misura: sweep a 50 / 100 / 200 / 400 / 1000 ms, dieci minuti ciascuno, con
+tutte e tredici le socket, guardando la **distribuzione** delle magnitudini di risincronizzazione.
+Lo snapclient fa una risincronizzazione dura solo sopra 500 ms di scarto: l'obiettivo non e zero
+risincronizzazioni, e nessuna abbastanza grande.
+
+**`idle_threshold` va portato a 2000 ms.** Vale 100 di default, e il controllo di stato scatta a
+`idle_threshold + chunk_ms` = 120 ms: e da li che nasce il lampeggio `idle ⇄ playing` del §2.2.
+Alzarlo cancella meta del problema gratis, e lascia che l'anticipo si occupi solo dell'altra meta.
+
+**`buffer` e una impostazione globale.** Non esiste per sorgente: sta in `[stream]` e vale per
+tutte le Zone insieme. Non si puo dare piu buffer a una stanza lontana — per quella c'e
+`Client.SetLatency`, limitato a `[-10000, buffer]`, quindi con `buffer=2000` l'intervallo utile e
+asimmetrico.
+
+**Ogni scrittura deve essere multipla di 4 byte.** Un frame stereo a 16 bit sono 4 byte; una
+scrittura disallineata inverte L e R **per sempre**, e snapserver non ha modo di riallinearsi fra
+una lettura e l'altra. E il classico residuo di una conversione da float: va messo come assertion.
