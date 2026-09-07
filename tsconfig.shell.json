@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.engine.json",
+  "compilerOptions": {
+    "outDir": "dist/shell",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src/shell/**/*.ts", "src/engine/**/*.ts"],
+  "exclude": ["src/**/*.test.ts"]
+}

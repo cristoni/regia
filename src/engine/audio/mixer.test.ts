@@ -213,6 +213,15 @@ describe('mixer: Sottofondo', () => {
 })
 
 describe('mixer: tenuta nel tempo', () => {
+  it('mille pressioni col mixer fermo non accumulano voci', () => {
+    // E il caso del Setup col server audio ancora spento: nessuno chiama
+    // prossimoBlocco, quindi nessuno pota le voci finite. Se si accumulassero,
+    // sarebbe una perdita di memoria che cresce a ogni pressione di pulsante.
+    const m = new MixerZona(AUDIO)
+    for (let i = 0; i < 1000; i++) m.avviaEffettoEsclusivo(continuo(PER_BLOCCO * 4, 9000))
+    assert.equal(m.stato().effettiAttivi, 1, 'con esclusivo ne deve restare una sola')
+  })
+
   it('cinque minuti di Sottofondo senza perdere un colpo ne accumulare voci', () => {
     // Il criterio §8.4 chiede sessanta minuti. Qui ne facciamo cinque per non
     // rallentare la suite; il soak completo sta nel banco di prova.
@@ -235,19 +244,12 @@ describe('mixer: tenuta nel tempo', () => {
   })
 
   it('un Effetto fermato subito dopo l avvio non sporca lo stato', () => {
-    // Apertura e arresto corrono insieme, quindi esce un soffio triangolare che
-    // non supera un quarto dell ampiezza. E il comportamento giusto: e una
-    // dissolvenza in entrata e in uscita, non un taglio.
+    // Una voce che non ha ancora prodotto un campione non ha niente da sfumare:
+    // sparisce subito, senza lasciare un soffio ne un oggetto in coda.
     const m = new MixerZona(AUDIO)
     const istanza = m.avviaEffetto(continuo(PER_BLOCCO * 4, 10000))
     m.fermaIstanza(istanza)
-    const u = suona(m, 2)
-    const picco = Math.max(...u.map(Math.abs))
-    assert.ok(picco <= 2600, `soffio troppo forte: ${picco}`)
-    assert.ok(
-      u.slice(CAMPIONI_DISSOLVENZA + 2).every((x) => x === 0),
-      'dopo la dissolvenza deve tacere del tutto',
-    )
-    assert.equal(m.stato().effettiAttivi, 0)
+    assert.equal(m.stato().effettiAttivi, 0, 'lo stato deve essere pulito prima ancora di mixare')
+    assert.ok(suona(m, 2).every((x) => x === 0))
   })
 })

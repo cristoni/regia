@@ -10,8 +10,10 @@ del Wi-Fi: più è alto, più il sistema tollera una rete carica senza che i cli
 underrun. Si sceglie l'affidabilità del §6 (sei ore senza interruzioni) sopra la latenza.
 
 **Conseguenza: il criterio §8.3 del documento di progetto non è più raggiungibile e va riscritto.**
-"Audio entro 1,5 s" diventa: *l'audio parte entro `buffer` + 200 ms, in modo deterministico e
-ripetibile, per 50 pressioni consecutive*. Il valore che conta non è quanto è breve il ritardo,
+"Audio entro 1,5 s" diventa: *l'audio parte entro `latenzaAttesaMs()` piu 200 ms di tolleranza,
+in modo deterministico e ripetibile, per 50 pressioni consecutive*. Il criterio si scrive contro
+quella funzione e non contro un numero: `latenzaAttesaMs()` vale `buffer + anticipo`, e l'anticipo
+non e ancora stato misurato. Il valore che conta non è quanto è breve il ritardo,
 è quanto è **costante**: un ritardo di due secondi sempre uguale è utilizzabile, uno da 800 ms
 che ogni tanto diventa 3 s non lo è.
 

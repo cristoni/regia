@@ -8,7 +8,7 @@ sbagliate, irraggiungibili o superate. Da riportare nella v1.1.
 | § | Dice | In realtà |
 |---|---|---|
 | 3.6, 4.5 | endpoint MJPEG `/video/m.jpeg` | è **`/video/mjpeg`** |
-| 3.3, 3.7 | la registrazione lato telefono è da evitare perché ricodifica | quella che ricodifica è la registrazione dal **pannello web** (`MediaRecorder`). L'app espone anche `/record/start`, `/record/stop`, `/record/status`, `/files.json`, `/files/<nome>`, che scrivono MP4 in locale senza ricodifica. È stata comunque scartata, ma per altri motivi — vedi ADR 0004 |
+| 3.3, 3.7 | la registrazione lato telefono è da evitare perché ricodifica | quella che ricodifica è la registrazione dal **pannello web** (`MediaRecorder`). L'app espone anche `/record/start`, `/record/stop`, `/record/status`, `/files.json`, `/files/<nome>`, che scrivono MP4 in locale senza ricodifica. È stata comunque scartata, ma per altri motivi — vedi ADR 0009 |
 | 4.2 opz. 1 | "binario nativo Windows compilato dal progetto… da valutare per prima" | **impossibile senza portare il progetto**: il `CMakeLists.txt` definisce `BUILD_SERVER` solo `if(NOT WIN32)`, con il commento "no Windows server for now". La CI upstream compila su Windows solo il client. Vedi ADR 0002 |
 | 3.8.3 | "rilevamento automatico via mDNS, che Snapserver già pubblica" | avahi/Bonjour sono compilati solo `if(NOT WIN32 AND NOT ANDROID)`, e da WSL2 in `networkingMode=mirrored` il multicast verso la LAN non è affidabile. **L'IP inserito a mano o via QR è l'unica strada**, non un ripiego |
 | 9 | configurazione di test con `buffer = 2000` | corretta e adottata, ma **incompatibile con il criterio §8.3** come è scritto oggi |

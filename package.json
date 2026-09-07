@@ -12,10 +12,11 @@
     "dev:engine": "tsx watch src/engine/index.ts",
     "dev:ui": "vite --config src/ui/vite.config.ts",
     "build:ui": "vite build --config src/ui/vite.config.ts",
-    "typecheck": "tsc -p tsconfig.engine.json --noEmit && tsc -p src/ui/tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.engine.json --noEmit && tsc -p tsconfig.shell.json --noEmit",
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "banco:altoparlanti": "tsx banco/altoparlanti-finti.ts",
-    "banco:telecamera": "tsx banco/telecamera-finta.ts"
+    "banco:telecamera": "tsx banco/telecamera-finta.ts",
+    "build:shell": "tsc -p tsconfig.shell.json"
   },
   "dependencies": {
     "ws": "^8.18.0",

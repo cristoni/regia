@@ -139,16 +139,34 @@ export class MixerZona {
 
   /** STOP di Zona: ferma gli Effetti, il Sottofondo continua (§3.5). */
   fermaEffetti(): void {
-    for (const v of this.voci) if (v.ruolo === 'effetto') v.chiudi()
+    this.chiudiVoci((v) => v.ruolo === 'effetto')
   }
 
   /** Ferma tutto, Sottofondo compreso. Il Flusso continua: diventa silenzio. */
   fermaTutto(): void {
-    for (const v of this.voci) v.chiudi()
+    this.chiudiVoci(() => true)
   }
 
   fermaIstanza(istanza: number): void {
-    for (const v of this.voci) if (v.istanza === istanza) v.chiudi()
+    this.chiudiVoci((v) => v.istanza === istanza)
+  }
+
+  private chiudiVoci(prova: (v: Voce) => boolean): void {
+    let daPotare = false
+    for (const v of this.voci) {
+      if (!prova(v)) continue
+      v.chiudi()
+      // Una voce che non ha ancora prodotto un solo campione non ha niente da
+      // sfumare: si chiude subito. Senza questo, con il mixer fermo -- che e la
+      // situazione normale col server audio spento, durante il Setup -- ogni
+      // pressione lascerebbe dietro una voce che nessuno verra mai a ripulire,
+      // perche a ripulire e `prossimoBlocco`, che nessuno sta chiamando.
+      if (v.suonati === 0) {
+        v.finita = true
+        daPotare = true
+      }
+    }
+    if (daPotare) this.voci = this.voci.filter((v) => !v.finita)
   }
 
   /** Sostituisce gli Effetti in corso invece di sovrapporsi (§3.5, opzionale). */
@@ -165,7 +183,9 @@ export class MixerZona {
     let effetti = 0
     let sottofondo = false
     for (const v of this.voci) {
-      if (v.finita) continue
+      // Una voce in arresto non e piu "in corso": sta sfumando, e l'Operatore
+      // ha gia premuto STOP. Contarla farebbe restare acceso il pulsante.
+      if (v.finita || v.inArresto) continue
       if (v.ruolo === 'effetto') effetti++
       else sottofondo = true
     }
