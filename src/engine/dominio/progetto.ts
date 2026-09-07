@@ -53,8 +53,12 @@ export const zAltoparlante = z.object({
   zonaId: zZonaId.nullable(),
   volume: zVolume,
   muto: z.boolean(),
-  /** Correzione di latenza in ms, per casse piu lente delle altre. */
-  latenzaMs: z.number().int().min(-2000).max(2000),
+  /**
+   * Correzione di latenza in ms, per casse piu lente delle altre.
+   * Snapserver la limita a `[-10000, buffer dello stream]`: con `buffer = 2000`
+   * l'intervallo utile e asimmetrico.
+   */
+  latenzaMs: z.number().int().min(-10000).max(10000),
   /** ISO 8601. Serve al comando "dimentica" per proporre i dispositivi spariti. */
   vistoIl: z.string().datetime(),
 })
@@ -96,7 +100,11 @@ export type Suono = z.infer<typeof zSuono>
 // -------------------------------------------------------- Impostazioni
 
 export const zImpostazioniAudio = z.object({
-  /** Vedi ADR 0007. E anche, per costruzione, la latenza fra pressione e suono. */
+  /**
+   * Vedi ADR 0007. Insieme ad `anticipoMs` E la latenza fra pressione e suono.
+   * In snapserver e una impostazione GLOBALE: non esiste per sorgente, quindi
+   * vale per tutte le Zone insieme.
+   */
   bufferMs: z.number().int().min(200).max(4000),
   /** `pcm` e l'unico verificato con Snapdroid. FLAC ha fallito in silenzio. */
   codec: z.enum(['pcm', 'opus', 'flac', 'ogg']),
@@ -108,8 +116,23 @@ export const zImpostazioniAudio = z.object({
   bloccoMs: z.number().int().min(5).max(100),
   /** Dissolvenza in apertura e chiusura di ogni Effetto, contro i click. */
   dissolvenzaMs: z.number().int().min(0).max(200),
-  /** Quanto il mixer scrive in anticipo, per assorbire le pause del GC. */
+  /**
+   * Quanto il mixer scrive in anticipo, per assorbire le pause del GC.
+   *
+   * Attenzione: **si somma a `bufferMs`**. Snapserver data i blocchi quando li
+   * legge, quindi l'audio fermo nella coda della socket ritarda il proprio
+   * timestamp. E un parametro di latenza, non solo di robustezza: va tenuto al
+   * minimo che regge, e il minimo si misura.
+   */
   anticipoMs: z.number().int().min(0).max(1000),
+  /**
+   * Quanto silenzio serve a snapserver per dichiarare inattivo uno stream.
+   *
+   * Di default vale 100 ms e il controllo scatta a `idle_threshold + chunk_ms`
+   * = 120 ms: e da li che nasce il lampeggio `idle <-> playing` che nei test
+   * faceva smettere di suonare i client (§2.2). Alzarlo lo cancella, gratis.
+   */
+  idleThresholdMs: z.number().int().min(10).max(10000),
 })
 export type ImpostazioniAudio = z.infer<typeof zImpostazioniAudio>
 
@@ -170,6 +193,7 @@ export function progettoVuoto(cartellaVideo: string): Progetto {
       bloccoMs: 20,
       dissolvenzaMs: 15,
       anticipoMs: 200,
+      idleThresholdMs: 2000,
     },
     server: {
       distro: 'Regia-Snapserver',
@@ -266,4 +290,23 @@ export function byteBlocco(a: ImpostazioniAudio): number {
 /** Banda continua per Altoparlante, in bit/s. Serve agli avvisi del setup guidato. */
 export function bandaPerAltoparlante(a: ImpostazioniAudio): number {
   return a.frequenza * a.canali * BYTE_PER_CAMPIONE * 8
+}
+
+/**
+ * Latenza attesa fra la pressione del pulsante e il suono dagli Altoparlanti.
+ * E la somma di buffer e anticipo, ed e il numero contro cui va scritto il
+ * criterio di accettazione §8.3 riformulato.
+ */
+export function latenzaAttesaMs(a: ImpostazioniAudio): number {
+  return a.bufferMs + a.anticipoMs
+}
+
+/**
+ * Byte di un frame: tutti i canali di un campione. Ogni scrittura verso
+ * snapserver deve essere un multiplo di questo valore, altrimenti L e R si
+ * invertono **per il resto della vita della connessione** -- snapserver non ha
+ * alcun concetto di frame fra una lettura e l'altra con cui riallinearsi.
+ */
+export function byteFrame(a: ImpostazioniAudio): number {
+  return a.canali * BYTE_PER_CAMPIONE
 }
