@@ -1,0 +1,32 @@
+{
+  "name": "regia",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Controllo audio e video per casa degli orrori",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:engine": "tsc -p tsconfig.engine.json",
+    "dev:engine": "tsx watch src/engine/index.ts",
+    "dev:ui": "vite --config src/ui/vite.config.ts",
+    "build:ui": "vite build --config src/ui/vite.config.ts",
+    "typecheck": "tsc -p tsconfig.engine.json --noEmit && tsc -p src/ui/tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "banco:altoparlanti": "tsx banco/altoparlanti-finti.ts",
+    "banco:telecamera": "tsx banco/telecamera-finta.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "electron": "^33.2.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}
