@@ -86,11 +86,60 @@ macchina · **[surrogato]** misurato su qualcosa che somiglia al vero, e va rifa
   accetta l'upgrade e `/stream`, che pero e il canale audio binario.
 - **[sorgente]** `Client.SetLatency` e limitato a `[-10000, buffer del suo stream]`. Con
   `buffer=2000` l'intervallo utile e da -10000 a +2000, non simmetrico.
-- **[surrogato]** ⚠️ **Tutte le forme di richiesta e risposta sono state verificate sulla 0.27.0**,
-  perche e quella installata da apt. La 0.35 dichiara `major 23` con il commento "backwards
-  incompatible change". Vanno ri-verificate contro la 0.35 prima di scrivere il riconciliatore.
+### Verificato contro una 0.35 vera, l'8 settembre 2026
+
+Il dubbio sulla 0.27 e chiuso: **le forme dei metodi che ci servono sono identiche sulla 0.35**.
+Il server riporta `controlProtocolVersion: 1`, `protocolVersion: 1`, `version: "0.35.0"`.
+
+- **[misurato]** **Ogni client che si connette riceve un gruppo tutto suo**, con un id UUID
+  generato dal server, e quel gruppo punta al **primo stream della configurazione** -- non a uno
+  stream "non assegnati". Tre client connessi hanno prodotto tre gruppi, tutti su `Ingresso`.
+  Il riconciliatore deve quindi *consolidare*, non *assegnare*: il lavoro c'e sempre.
+- **[misurato]** `Group.SetClients` risponde con lo stato completo del server (`{server: ...}`),
+  non con una conferma. Il gruppo rimasto vuoto **sparisce**.
+- **[misurato]** Togliere un client da un gruppo gli crea **un gruppo nuovo con un UUID nuovo**,
+  che eredita lo stream del gruppo da cui e uscito. Non si puo scegliere l'id di un gruppo: si
+  puo solo scoprirlo dopo.
+- **[misurato]** `Group.SetStream` risponde `{stream_id}`. Con uno stream inesistente risponde
+  errore `-32603`, `data: "Stream not found"`.
+- **[misurato]** `Client.SetName` risponde `{name}`, `Client.SetVolume` risponde
+  `{volume: {muted, percent}}` con `percent` da 0 a 100 (non 0-1).
+- **[misurato]** **`Client.SetLatency` tronca al `buffer`, in silenzio.** Chiesti 5000 ha
+  risposto 2000; chiesti 9999 ha risposto 2000. Il valore ottenuto va riletto dalla risposta,
+  mai assunto.
+- **[misurato]** Un client che si scollega **resta nel suo gruppo** con `connected: false` e
+  **conserva la sua configurazione** (nome, volume, latenza). E per questo che serve
+  `Server.DeleteClient` per il comando "dimentica": sparire dalla rete non basta.
+- **[misurato]** `Client.OnDisconnect` porta `{client: {...}}`; `Server.OnUpdate` porta
+  `{server: {...}}` completo. Gli stream nascono con `status: "idle"`.
+- **[misurato]** **Chi provoca un cambiamento non riceve la notifica di quel cambiamento**: la
+  risposta va a chi ha chiesto, la notifica a tutti gli altri. Un riconciliatore che aspettasse
+  di veder tornare indietro la propria modifica resterebbe fermo per sempre: si rilegge lo stato,
+  non si aspetta l'eco.
+- **[misurato]** Su Windows il MAC riportato e `00:00:00:00:00:00`: **`--hostID` e obbligatorio**
+  per avere client distinti. E l'id finale non e quello che passi: con `-i <n>` diverso da 1, il
+  server ci appende `#<n>`. `--hostID finto-2 -i 2` diventa il client `finto-2#2`.
 
 ---
+
+## La distro WSL, misurata
+
+- **[misurato]** Il `.deb` ufficiale **bookworm** di snapserver 0.35 **gira su Ubuntu 24.04 senza
+  modifiche**. Ubuntu 24.04 ha rinominato `libflac12` in `libflac12t64` (e cosi `libasound2` e
+  `libssl3`) per la transizione `time_t`, quindi `dpkg -i` fallirebbe sulle dipendenze -- ma sono
+  solo metadati: `ldd` sul binario estratto con `dpkg-deb -x` non riporta **nessuna** libreria
+  mancante, e `snapserver -v` risponde `v0.35.0`. Conferma che snapserver 0.35 **non dipende da
+  libboost**.
+  → Regia puo distribuire il `.deb` estratto invece che installato, il che elimina del tutto il
+  problema della distro ospite.
+- **[misurato]** **Snapserver muore quando esce il `wsl.exe` che l'ha lanciato**, con
+  `Received signal 1: Hangup`. `nohup` da solo **non** basta: WSL termina il gruppo di processi
+  della sessione. `setsid` lo tiene vivo.
+  → Due strade, ed e una scelta: tenere vivo il `wsl.exe` figlio (si guadagnano log e watchdog,
+  si perde la sopravvivenza a un crash di Regia), oppure staccarlo con `setsid` e ricollegarsi.
+- **[misurato]** `hostname -I` dentro la distro restituisce come primo indirizzo l'IP Wi-Fi di
+  Windows (`192.168.1.4`): la conferma diretta che su **questa** macchina `mirrored` e attivo, e
+  quindi che le misure di rete non valgono per un Windows di fabbrica. Vedi la misura 1 in fondo.
 
 ## android-ip-camera (commit d15dbb7, v0.12.0)
 
@@ -152,15 +201,15 @@ macchina · **[surrogato]** misurato su qualcosa che somiglia al vero, e va rifa
 
 In ordine di quanto bloccano:
 
-1. **Raggiungibilita LAN → WSL su una macchina in configurazione di fabbrica.** Vedi
+1. **Raggiungibilita LAN → WSL su una macchina in configurazione di fabbrica.** L'unica delle
+   cinque che resta davvero bloccante. Vedi
    [ADR 0003](adr/0003-regia-si-porta-la-propria-distro-wsl.md): tutte le misure di rete sono state
    prese su questa macchina, dove `networkingMode=mirrored` era **gia** attivo. Windows 11 pulito e
    in NAT.
-2. **Forma reale dell'API JSON-RPC 0.35**, contro la 0.27 su cui e stata verificata.
-3. **Sweep dell'anticipo** a 50 / 100 / 200 / 400 / 1000 ms, dieci minuti ciascuno, da Node su
+2. **Sweep dell'anticipo** a 50 / 100 / 200 / 400 / 1000 ms, dieci minuti ciascuno, da Node su
    Windows attraverso il ponte, con tutte e tredici le socket, registrando la **distribuzione**
    delle magnitudini di risincronizzazione e non il loro numero.
-4. **Quale porta di controllo usa Snapdroid** (1705 o 1780): decide se `[tcp-control]` va acceso.
-5. **Se il telefono emette B-frame.** Se li emette, gli MP4 registrati escono con PTS uguale a DTS
+3. **Quale porta di controllo usa Snapdroid** (1705 o 1780): decide se `[tcp-control]` va acceso.
+4. **Se il telefono emette B-frame.** Se li emette, gli MP4 registrati escono con PTS uguale a DTS
    e l'ordine di presentazione sbagliato.
    `ffmpeg -bsf:v trace_headers` su 100 KB presi dal telefono.

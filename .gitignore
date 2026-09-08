@@ -1,7 +1,8 @@
 node_modules/
 dist/
 out/
-vendor/bin/
-.cache/
+vendor/snapclient/
+.cache*/
+.cache-*
 *.log
 scratch/

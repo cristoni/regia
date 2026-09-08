@@ -79,19 +79,37 @@ function rendiUnici(nomi: readonly string[]): string[] {
   })
 }
 
+/**
+ * Codifica un valore per la query string di una sorgente.
+ *
+ * **Non si usa `URLSearchParams`**, e non e un dettaglio di stile. Quella segue
+ * la convenzione dei form HTML e codifica lo spazio come `+`; il parser di
+ * snapserver fa percent-decoding vero e il `+` se lo tiene. Verificato: una Zona
+ * chiamata "Non assegnati" diventava uno stream chiamato `Non+assegnati`, con
+ * il nome sbagliato in Snapdroid e, peggio, con l'identificativo che il
+ * riconciliatore non avrebbe piu ritrovato.
+ *
+ * `encodeURIComponent` produce `%20`, che snapserver decodifica correttamente --
+ * come fa gia con `%3A` dentro il sampleformat.
+ */
+function codifica(valore: string): string {
+  return encodeURIComponent(valore)
+}
+
 function sorgente(f: FlussoConfigurato, o: OpzioniConfigurazione, a: ImpostazioniAudio): string {
-  const q = new URLSearchParams({
-    name: f.id,
-    mode: 'server',
-    sampleformat: `${a.frequenza}:16:${a.canali}`,
-    codec: a.codec,
-    chunk_ms: String(a.bloccoMs),
+  const q: Array<[string, string]> = [
+    ['name', f.id],
+    ['mode', 'server'],
+    ['sampleformat', `${a.frequenza}:16:${a.canali}`],
+    ['codec', a.codec],
+    ['chunk_ms', String(a.bloccoMs)],
     // Di default vale 100 ms, e il controllo di stato scatta a
     // idle_threshold + chunk_ms = 120 ms: e da li che nasce il lampeggio
     // idle <-> playing che nei test faceva smettere di suonare i client.
-    idle_threshold: String(a.idleThresholdMs),
-  })
-  return `source = tcp://${o.indirizzo}:${f.porta}?${q.toString()}`
+    ['idle_threshold', String(a.idleThresholdMs)],
+  ]
+  const query = q.map(([k, v]) => `${k}=${codifica(v)}`).join('&')
+  return `source = tcp://${o.indirizzo}:${f.porta}?${query}`
 }
 
 export function flussiDi(p: Progetto): FlussoConfigurato[] {

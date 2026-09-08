@@ -156,3 +156,24 @@ describe('configurazione: rigenerazione', () => {
     assert.match(testo, /source = .*codec=opus/)
   })
 })
+
+describe('configurazione: codifica della query', () => {
+  it('codifica lo spazio come %20 e non come +', () => {
+    // Verificato contro snapserver 0.35 vero: il parser fa percent-decoding, ma
+    // il `+` se lo tiene. Con URLSearchParams la Zona "Non assegnati" diventava
+    // uno stream chiamato letteralmente "Non+assegnati".
+    const { testo } = generaConfigurazione(progetto('Salotto grande'))
+    assert.match(testo, /name=Salotto%20grande/)
+    assert.ok(!/name=\S*\+/.test(testo), 'nessun + nella query: snapserver non lo decodifica')
+  })
+
+  it('codifica i due punti del sampleformat, che snapserver decodifica', () => {
+    const { testo } = generaConfigurazione(progetto('A'))
+    assert.match(testo, /sampleformat=44100%3A16%3A2/)
+  })
+
+  it('codifica anche il nome del Flusso dei non assegnati', () => {
+    const { testo } = generaConfigurazione(progetto('A'))
+    assert.match(testo, /name=Non%20assegnati/)
+  })
+})
