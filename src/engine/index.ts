@@ -89,11 +89,9 @@ export class MotoreRegia implements Motore {
         // istante in cui il comando fosse a meta strada sarebbero diversi.
         volume: m?.volume ?? z.volume,
         sottofondoId: m?.sottofondoAttivo ? z.sottofondoId : null,
-        // Quali Effetti stiano suonando lo sapra il mixer quando terra traccia
-        // delle istanze; per ora l'interfaccia sa solo quanti sono.
-        effettiInCorso: Array.from({ length: m?.effettiAttivi ?? 0 }, (_, i) => ({
-          suonoId: '', istanza: i,
-        })),
+        // Con l'identificativo del Suono, non solo il conteggio: e cosi che
+        // l'interfaccia sa quale pulsante illuminare (§5.2).
+        effettiInCorso: m?.effetti ?? [],
         altoparlantiCollegati: 0,
         altoparlantiTotali: collegati.get(z.id) ?? 0,
         telecamereCollegate: 0,

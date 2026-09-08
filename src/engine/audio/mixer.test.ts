@@ -122,6 +122,21 @@ describe('mixer: composizione', () => {
     assert.equal(m.stato().effettiAttivi, 2)
   })
 
+  it('dice QUALI Effetti stanno suonando, non solo quanti', () => {
+    // Senza l'identificativo del Suono l'interfaccia non saprebbe quale
+    // pulsante illuminare, e il feedback del §5.2 sarebbe impossibile.
+    const m = new MixerZona(AUDIO)
+    const i1 = m.avviaEffetto(continuo(PER_BLOCCO * 4, 3000, 'urlo'))
+    const i2 = m.avviaEffetto(continuo(PER_BLOCCO * 4, 3000, 'botto'))
+    assert.deepEqual(m.stato().effetti, [
+      { suonoId: 'urlo', istanza: i1 },
+      { suonoId: 'botto', istanza: i2 },
+    ])
+
+    m.fermaIstanza(i1)
+    assert.deepEqual(m.stato().effetti, [{ suonoId: 'botto', istanza: i2 }])
+  })
+
   it('taglia invece di andare in wrap-around quando la somma sfonda', () => {
     const m = new MixerZona(AUDIO)
     for (let i = 0; i < 6; i++) m.avviaEffetto(continuo(PER_BLOCCO * 2, 30000, `s${i}`))
@@ -208,7 +223,9 @@ describe('mixer: Sottofondo', () => {
     const u = suona(m, 2)
     assert.equal(u.length, PER_BLOCCO * 2)
     assert.ok(u.every((x) => x === 0))
-    assert.deepEqual(m.stato(), { volume: 1, effettiAttivi: 0, sottofondoAttivo: false })
+    assert.deepEqual(m.stato(), {
+      volume: 1, effetti: [], effettiAttivi: 0, sottofondoAttivo: false,
+    })
   })
 })
 

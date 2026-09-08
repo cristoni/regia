@@ -79,8 +79,18 @@ class Voce {
   }
 }
 
+export interface EffettoInCorso {
+  readonly suonoId: string
+  readonly istanza: number
+}
+
 export interface StatoZona {
   readonly volume: number
+  /**
+   * Quali Effetti stanno suonando, non quanti: l'interfaccia deve illuminare il
+   * pulsante *giusto* (§5.2), e con un semplice conteggio non potrebbe.
+   */
+  readonly effetti: readonly EffettoInCorso[]
   readonly effettiAttivi: number
   readonly sottofondoAttivo: boolean
 }
@@ -180,16 +190,21 @@ export class MixerZona {
   }
 
   stato(): StatoZona {
-    let effetti = 0
+    const effetti: EffettoInCorso[] = []
     let sottofondo = false
     for (const v of this.voci) {
       // Una voce in arresto non e piu "in corso": sta sfumando, e l'Operatore
       // ha gia premuto STOP. Contarla farebbe restare acceso il pulsante.
       if (v.finita || v.inArresto) continue
-      if (v.ruolo === 'effetto') effetti++
+      if (v.ruolo === 'effetto') effetti.push({ suonoId: v.fonte.suonoId, istanza: v.istanza })
       else sottofondo = true
     }
-    return { volume: this.volume, effettiAttivi: effetti, sottofondoAttivo: sottofondo }
+    return {
+      volume: this.volume,
+      effetti,
+      effettiAttivi: effetti.length,
+      sottofondoAttivo: sottofondo,
+    }
   }
 
   // ------------------------------------------------------------- il mix

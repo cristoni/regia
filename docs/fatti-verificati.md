@@ -185,15 +185,42 @@ Il server riporta `controlProtocolVersion: 1`, `protocolVersion: 1`, `version: "
 
 ---
 
-## snapclient.exe come banco di prova
+## Il banco di prova
 
-- **[misurato]** `snapclient.exe` 0.35.0 parte su questa macchina e restituisce 0. Sintassi:
-  `snapclient [opzioni...] [url]` con url `<tcp|ws|wss>://host`.
-- **[misurato]** Serve sempre passare `--hostID` esplicito per avere N client distinti sulla stessa
-  macchina.
-- **[surrogato]** ⚠️ Le misure sui client finti sono state prese **in ciclo di riconnessione, mai
-  in streaming**: il player viene costruito solo dopo una connessione riuscita, quindi decodifica e
-  timer non sono nel conto. Il costo reale di otto Altoparlanti finti e ancora ignoto.
+- **[misurato]** ⚠️ **Il `snapclient.exe` per Windows non si sincronizza con un snapserver
+  Linux.** Riporta `diff to server [ms]: -1.78885e+12` -- meno cinquantasei anni, l'ordine di
+  grandezza esatto dell'epoch Unix -- e da li scarta ogni chunk, ripetendo "No chunks available"
+  una volta al secondo. Lo **stesso** client compilato per Linux, contro lo **stesso** server,
+  riporta `diff to server: 0.008 ms` e non perde nulla. Le due basi temporali non sono la stessa.
+  → Gli Altoparlanti finti girano **dentro la distro**. Non tocca il prodotto (Snapdroid usa un
+  client Android), ma un PC Windows non puo fare da Altoparlante aggiuntivo.
+- **[misurato]** Quattro client Linux nella distro si sincronizzano a **7-14 microsecondi**.
+- **[misurato]** `--player file:filename=/dev/null` consuma i chunk al ritmo giusto senza toccare
+  una scheda audio: e il player nullo che serve a un soak lungo.
+- **[misurato]** `pkill -f "<percorso del binario>"` **uccide la shell che lo esegue**, perche il
+  percorso compare anche nella riga di comando di quella shell. Tutto cio che viene dopo non
+  succede, in silenzio. Si usa `pkill -x snapclient`, sul nome esatto del processo.
+
+## Il percorso audio, misurato da capo a fondo
+
+Quattro Zone, quattro sorgenti TCP, quattro Altoparlanti finti, `buffer = 2000`:
+
+- **[misurato]** Scrivendo, tutti gli stream passano da `idle` a `playing` entro tre secondi, e
+  tornano a `idle` due secondi dopo che si smette -- esattamente `idle_threshold`. E l'unica
+  conferma applicativa che snapserver stia davvero leggendo.
+- **[misurato]** In quattordici secondi di scrittura continua: 711 blocchi per sorgente, 2.450 KB,
+  scarto sempre positivo (~200 ms avanti all'orologio), **zero buchi e zero cadute**.
+- **[misurato]** Sweep dell'anticipo a 50 / 100 / 200 / 400 / 1000 ms, venti secondi ciascuno:
+  **nessuna risincronizzazione e nessun chunk perso, a nessun valore**. I client non si sono mai
+  accorti di niente.
+- **[misurato]** Restano pero i riallineamenti **nostri**: lo scrittore ogni tanto resta indietro
+  di oltre mezzo secondo e rinuncia a un pezzo di Flusso. Con quattro scrittori, otto client e un
+  server sulla stessa macchina, sul thread principale di Node. **E la prova sperimentale che il
+  mixer va spostato in un `worker_thread`**, come l'ADR 0004 gia prescriveva.
+- **[misurato]** Su Windows la risoluzione dei timer e 15,6 ms: `setTimeout(20)` dorme ~31 ms.
+  Svegliandosi a ogni blocco si perdono ~11 ms per giro, e in dodici secondi si accumulano 6,5
+  secondi di riallineamento con scarto **negativo**. Ci si sveglia ogni mezzo anticipo e si
+  scrivono piu blocchi per volta.
 
 ---
 

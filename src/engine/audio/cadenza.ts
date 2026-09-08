@@ -104,13 +104,30 @@ export class Cadenza {
     return { blocchi, buchiMs }
   }
 
-  /** Millisecondi da aspettare prima di avere di nuovo qualcosa da scrivere. */
+  /**
+   * Millisecondi da aspettare prima di avere di nuovo qualcosa da scrivere.
+   *
+   * Il tetto NON e un blocco, ed e una lezione presa sul campo: su Windows la
+   * risoluzione dei timer e 15,6 ms, quindi `setTimeout(20)` dorme davvero
+   * ~31 ms. Svegliandosi a ogni blocco si perderebbero ~11 ms per giro -- e in
+   * dodici secondi di misura questo ha prodotto 6,5 secondi di riallineamento e
+   * uno scarto NEGATIVO, cioe un flusso perennemente in ritardo.
+   *
+   * Ci si sveglia invece ogni mezzo anticipo e si scrivono piu blocchi in una
+   * volta: dormire 15 ms di troppo su 100 e assorbito da cio che resta
+   * dell'anticipo. Il prezzo e che la pressione di un pulsante puo aspettare
+   * fino a un risveglio prima di entrare nel mix.
+   */
   attesaMs(): number {
     if (this.avviataA === null) return this.bloccoMs
     const scadenza = this.scritti * this.bloccoMs - this.anticipoMs
     const attesa = scadenza - (this.adesso() - this.avviataA)
-    // Mai negativo, e mai piu di un blocco: cosi il ciclo resta reattivo ai comandi.
-    return Math.max(0, Math.min(this.bloccoMs, attesa))
+    return Math.max(0, Math.min(this.tettoAttesaMs, attesa))
+  }
+
+  /** Quanto a lungo si puo dormire senza mangiarsi l'anticipo. */
+  get tettoAttesaMs(): number {
+    return Math.max(this.bloccoMs, Math.floor(this.anticipoMs / 2))
   }
 
   diagnostica(): {

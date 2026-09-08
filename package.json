@@ -16,7 +16,9 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "build:shell": "tsc -p tsconfig.shell.json",
     "banco:conf": "tsx banco/genera-conf.ts",
-    "banco:riconcilia": "tsx banco/riconcilia-dal-vero.ts"
+    "banco:riconcilia": "tsx banco/riconcilia-dal-vero.ts",
+    "banco:prepara": "tsx banco/prepara.ts",
+    "banco:scrivi": "tsx banco/scrivi-dal-vero.ts"
   },
   "dependencies": {
     "ws": "^8.18.0",

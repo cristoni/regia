@@ -43,7 +43,7 @@ rpc.on('notifica', (metodo: string) => console.log(`   ← notifica ${metodo}`))
 await rpc.collega()
 console.log('Collegato alla porta di controllo.\n')
 
-const iniziale = await rpc.stato()
+let iniziale = await rpc.stato()
 console.log(`Stream sul server: ${iniziale.streamIds.join(', ')}`)
 console.log(`Client visti: ${iniziale.clienti.length}, gruppi: ${iniziale.gruppi.length}`)
 console.log('Collocazione iniziale:', collocazione(iniziale), '\n')
@@ -52,6 +52,27 @@ if (iniziale.clienti.length === 0) {
   console.log('Nessun client collegato: avvia qualche snapclient e riprova.')
   await rpc.chiudi()
   process.exit(1)
+}
+
+/**
+ * Semina apposta il caso che richiede piu di una passata.
+ *
+ * Serve perche il ramo multi-passata del riconciliatore -- quello che scatta
+ * quando togliere un client da un gruppo gliene fa nascere uno nuovo, con un id
+ * che si scopre solo dopo -- finora era stato provato solo contro il *nostro*
+ * simulatore. Se il simulatore sbagliasse su dove finiscono gli orfani,
+ * pianificatore e simulatore sarebbero d'accordo ed entrambi sbagliati.
+ *
+ * Ammassando tutti i client in un gruppo solo, e volendoli poi in Zone diverse,
+ * il server deve per forza creare gruppi nuovi.
+ */
+if (iniziale.clienti.length >= 3 && !process.argv.includes('--senza-semina')) {
+  const bersaglio = iniziale.gruppi[0]!.id
+  console.log(`Semina: ammasso tutti i client nel gruppo ${bersaglio.slice(0, 8)}...`)
+  await rpc.gruppoClient(bersaglio, iniziale.clienti.map((c) => c.id))
+  iniziale = await rpc.stato()
+  console.log(`   gruppi dopo la semina: ${iniziale.gruppi.length}`)
+  console.log('   collocazione:', collocazione(iniziale), '\n')
 }
 
 // Progetto finto: i client si distribuiscono a giro sulle Zone vere del server.

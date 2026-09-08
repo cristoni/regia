@@ -115,14 +115,23 @@ describe('cadenza di scrittura', () => {
     assert.equal(c.diagnostica().riallineamenti, 1, 'non deve riallinearsi di nuovo')
   })
 
-  it('dice quanto aspettare, e mai piu di un blocco', () => {
+  it('dorme fino a mezzo anticipo, non un blocco solo', () => {
+    // Su Windows la risoluzione dei timer e 15,6 ms: svegliarsi ogni 20 ms
+    // significa dormirne 31 e perderne 11 a ogni giro. Misurato: 6,5 s di
+    // riallineamento in 12 s di prova.
     const { c, o } = cadenza()
     c.dovuti()
+    assert.equal(c.tettoAttesaMs, ANTICIPO / 2)
     const attesa = c.attesaMs()
-    assert.ok(attesa > 0 && attesa <= BLOCCO, `attesa fuori scala: ${attesa}`)
+    assert.ok(attesa > 0 && attesa <= ANTICIPO / 2, `attesa fuori scala: ${attesa}`)
 
     o.avanza(10_000)
     assert.equal(c.attesaMs(), 0, 'se siamo in ritardo non si aspetta')
+  })
+
+  it('con un anticipo minuscolo il tetto non scende sotto un blocco', () => {
+    const c = new Cadenza(BLOCCO, 10, RECUPERO, () => 0)
+    assert.equal(c.tettoAttesaMs, BLOCCO)
   })
 
   it('si rifiuta di contare prima di essere avviata', () => {
