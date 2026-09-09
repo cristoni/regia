@@ -212,11 +212,18 @@ describe('motore: pilotabile senza interfaccia', () => {
     assert.match(errore, /non e abilitato/)
   })
 
-  it('dice chiaramente cosa non e ancora collegato, invece di fingere', async () => {
+  it('lo stato porta con se tutto quello che serve a una schermata', async () => {
     const { motore } = await ambiente()
     const op = await Operatore.collega(motore.indirizzo)
-    const errore = await op.comandaSperandoInErrore({ tipo: 'server.avvia' })
-    assert.match(errore, /non ancora collegato/)
+    await op.comanda({ tipo: 'zona.crea', nome: 'Ingresso', colore: '#ff6600' })
+    const s = await op.stato((x) => x.zone.length === 1)
+
+    // Cio che l'interfaccia non puo ricavare da sola e deve trovare qui.
+    assert.equal(s.zone[0]!.suoniAbilitati, null)
+    assert.equal(s.zone[0]!.flusso, 'Ingresso')
+    assert.equal(s.latenzaAttesaMs, s.impostazioni.audio.bufferMs + s.impostazioni.audio.anticipoMs)
+    assert.ok(s.impostazioni.registrazione.cartella.length > 0)
+    assert.ok(s.impostazioni.server.distro.length > 0)
   })
 })
 

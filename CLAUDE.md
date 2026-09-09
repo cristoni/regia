@@ -15,9 +15,10 @@ fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
 ## Comandi
 
 ```bash
-npm test                      # 152 test. Concorrenza 1: ogni motore avvia un thread audio
-npm run typecheck             # engine + shell
-npm run build:engine          # tsc -> dist/engine
+npm test                      # 192 test. Concorrenza 1: ogni motore avvia un thread audio
+npm run typecheck             # engine, shell, interfaccia, test dell'interfaccia
+npm run build                 # interfaccia + motore + guscio
+npm run dev                   # compila l'interfaccia e avvia Regia senza finestra, su :7333
 
 # un solo file di test
 node --import tsx --test src/engine/audio/mixer.test.ts
@@ -28,7 +29,9 @@ node --import tsx --test --test-name-pattern="sei ore" src/engine/audio/cadenza.
 I test girano con il loader `tsx`, non con lo strip-types di Node: gli import interni usano
 l'estensione `.js` (convenzione NodeNext) anche se i file sono `.ts`.
 
-`dev:ui` e `build:ui` in `package.json` puntano a `src/ui/`, che **non esiste ancora**.
+**Regia si avvia anche senza Electron**: `npx tsx src/engine/avvia.ts --porta 7333 [--rete]`
+serve l'interfaccia vera su HTTP, ed è il modo più rapido per pilotarla da script e guardarla
+insieme. `--rete` la espone a tutta la LAN invece che a loopback (è il tablet della Fase 3).
 
 ## Il banco di prova (richiede WSL)
 
@@ -44,7 +47,10 @@ wsl -d Ubuntu -u root -e bash -lc \
 
 npx tsx banco/altoparlanti-finti.ts 4   # Altoparlanti finti DENTRO la distro
 npm run banco:riconcilia                # riconciliatore contro il server vero
-npm run banco:carico -- 40              # blocca il thread principale, verifica che l'audio regga
+# HOST_FLUSSI va all'indirizzo della distro: su loopback gli inoltri di WSL
+# sopravvivono al server morto e il banco misurerebbe un Flusso dentro un fantasma.
+HOST_FLUSSI=$(wsl -d Ubuntu hostname -I | cut -d' ' -f1) \
+  npm run banco:carico -- 40            # blocca il thread principale, verifica che l'audio regga
 ```
 
 `setsid` è obbligatorio: senza, snapserver riceve SIGHUP e muore appena esce il `wsl.exe` che l'ha
@@ -59,6 +65,16 @@ WebSocket locale (`/regia`); la finestra Electron è "un browser dedicato" che a
 e il tablet della Fase 3 sarà un secondo client identico. Lo stato viaggia come **istantanea
 completa** ogni 100 ms, non come differenze: con 12 Zone sono pochi kilobyte e non può
 desincronizzarsi. I test d'insieme pilotano il motore da script, senza interfaccia.
+
+**L'interfaccia non ha un framework, ed è una scelta.** L'istantanea arriva dieci volte al
+secondo: un framework che ricostruisce l'albero a ogni istantanea distruggerebbe i `<canvas>` delle
+Telecamere, e con loro il `VideoDecoder` che ci sta dietro — un secondo di nero per cella, dieci
+volte al secondo. Si costruisce una volta e si aggiorna in posto, con `Elenco` (`src/ui/nucleo/dom.ts`)
+a tenere allineate le liste per chiave. Le derivazioni pure stanno in `src/ui/nucleo/viste.ts` e
+sono le uniche cose dell'interfaccia che si collaudano; il codice che tocca il DOM è sottile
+apposta. **File caricati dall'interfaccia (Suoni, progetto) viaggiano come byte su HTTP**, non
+come percorsi: con `sandbox: true` un `<input type=file>` non dà il percorso vero, e il tablet non
+ha nemmeno lo stesso disco.
 
 **Tre processi/thread, e il confine fra loro conta:**
 
@@ -97,7 +113,7 @@ completa minuti dopo con un riferimento temporale vecchio.
   WSL, ffmpeg o le telecamere. Ogni riga è marcata `[sorgente]` (letto nel codice upstream),
   `[misurato]` (eseguito su questa macchina) o `[surrogato]` (misurato su un sostituto, da rifare).
   Quando il codice sembra strano, la ragione è quasi sempre lì.
-- **`docs/adr/`** — nove decisioni, ciascuna con le alternative scartate e perché. Alcune sono
+- **`docs/adr/`** — dieci decisioni, ciascuna con le alternative scartate e perché. Alcune sono
   state **corrette dopo la ricerca**: la correzione è in fondo al file, non sostituisce il testo.
 - **`docs/scostamenti-dal-documento-di-progetto.md`** — errori e criteri irraggiungibili di
   `project.md`, da riportare al committente.
@@ -112,7 +128,18 @@ si aggiunge un ADR. Quando si misura qualcosa, si aggiunge una riga ai fatti ver
 - **Ogni scrittura verso snapserver dev'essere multipla di un frame** (4 byte a 16 bit stereo).
   Una scrittura disallineata inverte L e R per il resto della vita della connessione.
 - **`connect()` che riesce non prova che snapserver stia leggendo**: accetta una sola connessione
-  per porta e il kernel parcheggia le altre. Una sola socket per porta, sempre.
+  per porta e il kernel parcheggia le altre. Una sola socket per porta, sempre. Vale anche per la
+  **porta di controllo**: la prova che snapserver c'è è una risposta a `Server.GetStatus`, non una
+  connessione aperta.
+- **Si parla alla distro per indirizzo IP, mai a `127.0.0.1`** (ADR 0010). Gli inoltri che WSL
+  crea su loopback **sopravvivono al processo che ascoltava**: `connect()` riesce, i byte partono,
+  non li legge nessuno. E `0.0.0.0` contiene `127.0.0.1`, quindi un ponte che inoltra lì parla con
+  se stesso.
+- **Uno stream `idle` non vuol dire che non arrivano byte: vuol dire che arriva silenzio.** A casa
+  vuota tutti gli stream sono `idle` ed è giusto così. Il criterio «passano a `playing`» vale
+  mentre si suona qualcosa.
+- **In bash `&` ha precedenza più bassa di `&&`**: `mkdir -p X && setsid ... &` manda in background
+  anche il `mkdir`, la shell esce, e non succede niente — senza errori e con esito zero.
 - **Il ritmo di scrittura lo detta l'orologio monotono, mai l'attesa di `drain`.** Scrivere finché
   arriva contropressione fa crescere la finestra TCP fino a secondi di audio in volo, senza errori.
 - **L'anticipo di scrittura si somma al `buffer`**: la latenza pulsante→suono è

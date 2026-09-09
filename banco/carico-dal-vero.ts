@@ -13,6 +13,12 @@
  * serializzazione grossa. Se il Flusso regge questo, regge sei anteprime video.
  *
  * Presuppone: banco preparato, snapserver acceso con Ingresso/Cantina/Soffitta.
+ *
+ * `HOST_FLUSSI` dice dove mandare le sorgenti. Va messo all'indirizzo della
+ * distro (`wsl hostname -I`), non lasciato su `127.0.0.1`: gli inoltri che WSL
+ * crea su loopback **sopravvivono al processo che ascoltava**, quindi contro un
+ * server morto la `connect()` riesce lo stesso e il banco misurerebbe un Flusso
+ * perfetto dentro un fantasma (ADR 0010).
  */
 import { progettoVuoto, type Zona } from '../src/engine/dominio/progetto.ts'
 import { MotoreAudio } from '../src/engine/audio/motore-audio.ts'
@@ -35,7 +41,10 @@ const diario: string[] = []
 const audio = new MotoreAudio({ suDiario: (l, t) => diario.push(`[${l}] ${t}`) })
 await audio.aspettaPronto()
 
+// L'host e il primo argomento da quando le sorgenti vanno all'indirizzo della
+// distro e non a `127.0.0.1` (ADR 0010). Qui il banco parla al server locale.
 audio.configura(
+  process.env.HOST_FLUSSI ?? '127.0.0.1',
   progetto.audio,
   flussi.map((f) => ({ id: f.id, zonaId: f.zonaId, porta: f.porta, volume: 1 })),
 )

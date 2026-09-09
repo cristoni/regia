@@ -63,6 +63,18 @@ export interface OpzioniScrittore {
   readonly collega: () => Promise<Destinazione>
   /** Attesa fra due tentativi di collegamento. */
   readonly attesaRiprovaMs?: number
+  /**
+   * Quanto si aspetta al massimo che la socket si scarichi.
+   *
+   * Non e prudenza: e la difesa contro la trappola dell'`async_accept`.
+   * Snapserver in `mode=server` accetta **una sola** connessione per porta e
+   * non ne posta un'altra finche quella non muore; il kernel pero completa lo
+   * handshake delle successive e le parcheggia. Una socket parcheggiata sembra
+   * viva, accetta byte finche il buffer non e pieno, e poi **non si scarica
+   * mai**. Senza un tetto qui, quello scrittore resta fermo per sempre --
+   * e con lui, aspettandolo, tutto il thread audio.
+   */
+  readonly attesaScaricoMs?: number
   readonly suDiagnostica?: (messaggio: string) => void
   readonly adesso?: () => number
   readonly dormi?: (ms: number) => Promise<void>
@@ -88,6 +100,7 @@ export class Scrittore {
   private readonly mixer: MixerZona
   private readonly collega: () => Promise<Destinazione>
   private readonly attesaRiprovaMs: number
+  private readonly attesaScaricoMs: number
   private readonly suDiagnostica: (m: string) => void
   private readonly dormi: (ms: number) => Promise<void>
 
@@ -96,6 +109,10 @@ export class Scrittore {
     this.mixer = o.mixer
     this.collega = o.collega
     this.attesaRiprovaMs = o.attesaRiprovaMs ?? 500
+    // Una connessione sana si scarica in millisecondi: qualunque valore sopra
+    // il secondo e gia diagnostico. Si tiene comunque legato all'anticipo,
+    // perche e quello a dire quanto audio puo essere in volo.
+    this.attesaScaricoMs = o.attesaScaricoMs ?? Math.max(1000, o.impostazioni.anticipoMs * 2)
     this.suDiagnostica = o.suDiagnostica ?? (() => {})
     this.dormi = o.dormi ?? ((ms) => new Promise((r) => setTimeout(r, ms)))
 
@@ -129,11 +146,30 @@ export class Scrittore {
     this.ciclo = this.esegui()
   }
 
+  /**
+   * Ferma il ciclo e chiude la connessione.
+   *
+   * L'ordine conta, e costa caro sbagliarlo: si stacca la destinazione **prima**
+   * di aspettare il ciclo. Il ciclo puo essere fermo dentro `attendiScarico()`,
+   * e quell'attesa finisce in due modi soli -- la socket si scarica, o la socket
+   * si chiude. Su una socket parcheggiata da snapserver il primo non succede
+   * mai, quindi aspettare il ciclo prima di chiuderla e aspettare per sempre:
+   * e con `configura` che aspetta `ferma()`, si ferma l'intera coda del thread
+   * audio, e da li in poi nessun Suono si carica piu.
+   */
   async ferma(): Promise<void> {
     this.fermare = true
-    await this.ciclo?.catch(() => {})
-    this.ciclo = null
+    // Prima: sblocca un ciclo fermo su `attendiScarico()`.
     await this.staccaDestinazione()
+    await this.ciclo?.catch(() => {})
+    // Poi di nuovo, e non e ridondante. Il ciclo puo essere stato sorpreso
+    // dentro `riprovaCollegamento()`: quella finisce di collegarsi comunque --
+    // la connessione era gia in volo -- e assegna una destinazione nuova prima
+    // di accorgersi che deve uscire. Senza questa seconda passata quella socket
+    // resta aperta e abbandonata, e snapserver se la tiene nella coda di
+    // accettazione con dentro megabyte che nessuno leggera mai.
+    await this.staccaDestinazione()
+    this.ciclo = null
     this.stato = 'fermo'
   }
 
@@ -164,6 +200,10 @@ export class Scrittore {
       try {
         await this.scriviQuantoDovuto()
       } catch (e) {
+        // Se stiamo fermando, l'errore siamo noi: `ferma()` ha appena staccato
+        // la destinazione sotto il ciclo, apposta. Contarla come caduta
+        // sporcherebbe la diagnostica di un guasto che non c'e stato.
+        if (this.fermare) return
         this.suDiagnostica(`scrittura fallita: ${(e as Error).message}`)
         await this.segnalaCaduta()
         continue
@@ -173,6 +213,10 @@ export class Scrittore {
   }
 
   private async riprovaCollegamento(): Promise<boolean> {
+    // Ci si puo arrivare con la fermata gia chiesta: aprire adesso una
+    // connessione significherebbe aprirne una che nessuno chiudera.
+    if (this.fermare) return false
+
     // Una connessione che muore fra due giri del ciclo e una caduta esattamente
     // come una che esplode durante una scrittura: per chi guarda il pannello di
     // stato e lo stesso telefono che ha smesso di suonare. `segnalaCaduta` ha
@@ -186,7 +230,15 @@ export class Scrittore {
     // modo di essere certi di non lasciare due socket vive sulla stessa porta.
     await this.staccaDestinazione()
     try {
-      this.destinazione = await this.collega()
+      const destinazione = await this.collega()
+      // Fra la richiesta e la risposta puo essere arrivato un `ferma()`: la
+      // connessione e comunque nata, e va chiusa qui, subito, non lasciata
+      // assegnata a uno scrittore che sta uscendo.
+      if (this.fermare) {
+        await destinazione.chiudi().catch(() => {})
+        return false
+      }
+      this.destinazione = destinazione
     } catch (e) {
       // Si segnala il primo fallimento e poi si tace fino al ritorno. Il caso
       // normale e "il server audio non e ancora acceso": riprovare due volte al
@@ -228,8 +280,42 @@ export class Scrittore {
         // NON e questo che detta il ritmo: il ritmo lo detta la cadenza. Qui si
         // aspetta soltanto per non far crescere la coda in memoria del processo.
         this.attesePerScarico++
-        await d.attendiScarico()
+        await this.attendiScaricoOScade(d)
       }
+    }
+  }
+
+  /**
+   * Aspetta lo scarico, ma non per sempre.
+   *
+   * Una socket che non si scarica entro il tetto e quasi certamente parcheggiata
+   * dal kernel in attesa di un `async_accept` che snapserver non postera finche
+   * la connessione corrente non muore. L'unica uscita e farla morire: si lancia,
+   * e il ciclo la tratta come una caduta qualsiasi e si ricollega -- e a quel
+   * punto snapserver accetta noi.
+   */
+  private async attendiScaricoOScade(d: Destinazione): Promise<void> {
+    // Timer vero, non `dormi`. `dormi` e l'attesa **della timeline audio**, ed e
+    // il modo con cui i test fanno scorrere l'orologio finto: usarla qui
+    // sposterebbe in avanti l'orologio del Flusso ogni volta che scatta la
+    // contropressione, e la cadenza si troverebbe un secondo di audio da
+    // recuperare che nessuno le ha chiesto. Questa scadenza parla di tempo
+    // vero, quello in cui una socket sana si scarica in millisecondi.
+    let scadenza: ReturnType<typeof setTimeout> | undefined
+    const scaduta = new Promise<'scaduta'>((ok) => {
+      scadenza = setTimeout(() => ok('scaduta'), this.attesaScaricoMs)
+      scadenza.unref?.()
+    })
+    try {
+      const esito = await Promise.race([d.attendiScarico().then(() => 'scaricata' as const), scaduta])
+      if (esito === 'scaduta') {
+        throw new Error(
+          `la socket non si scarica da ${this.attesaScaricoMs} ms: probabilmente snapserver ` +
+            'non la sta leggendo',
+        )
+      }
+    } finally {
+      clearTimeout(scadenza)
     }
   }
 

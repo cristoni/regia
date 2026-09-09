@@ -9,17 +9,20 @@
   },
   "scripts": {
     "build:engine": "tsc -p tsconfig.engine.json",
-    "dev:engine": "tsx watch src/engine/index.ts",
+    "dev:engine": "tsx src/engine/avvia.ts",
     "dev:ui": "vite --config src/ui/vite.config.ts",
     "build:ui": "vite build --config src/ui/vite.config.ts",
-    "typecheck": "tsc -p tsconfig.engine.json --noEmit && tsc -p tsconfig.shell.json --noEmit",
+    "typecheck": "tsc -p tsconfig.engine.json --noEmit && tsc -p tsconfig.shell.json --noEmit && tsc -p tsconfig.ui.json --noEmit && tsc -p tsconfig.ui-test.json --noEmit",
     "test": "node --import tsx --test --test-concurrency=1 --test-timeout=30000 \"src/**/*.test.ts\"",
     "build:shell": "tsc -p tsconfig.shell.json",
     "banco:conf": "tsx banco/genera-conf.ts",
     "banco:riconcilia": "tsx banco/riconcilia-dal-vero.ts",
     "banco:prepara": "tsx banco/prepara.ts",
     "banco:scrivi": "tsx banco/scrivi-dal-vero.ts",
-    "banco:carico": "tsx banco/carico-dal-vero.ts"
+    "banco:carico": "tsx banco/carico-dal-vero.ts",
+    "build": "npm run build:ui && npm run build:engine && npm run build:shell",
+    "start": "npm run build:ui && electron .",
+    "dev": "npm run build:ui && tsx src/engine/avvia.ts"
   },
   "dependencies": {
     "ws": "^8.18.0",
@@ -32,5 +35,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
-  }
+  },
+  "main": "dist/shell/shell/main.js"
 }

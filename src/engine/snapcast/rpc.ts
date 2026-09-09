@@ -209,6 +209,7 @@ interface RispostaServer {
     clients: Array<{
       id: string
       connected: boolean
+      host?: { ip?: string; name?: string }
       config: { name: string; latency: number; volume: { muted: boolean; percent: number } }
     }>
   }>
@@ -229,13 +230,16 @@ export function leggiStato(server: RispostaServer): StatoOsservato {
   for (const g of server.groups ?? []) {
     gruppi.push({ id: g.id, streamId: g.stream_id, clientIds: (g.clients ?? []).map((c) => c.id) })
     for (const c of g.clients ?? []) {
+      // Il nome mostrato in Snapdroid puo stare in `config.name` o, se non e
+      // mai stato riscritto, solo in `host.name`: si prende il primo che c'e.
       clienti.push({
         id: c.id,
         connesso: c.connected,
-        nome: c.config?.name ?? '',
+        nome: c.config?.name || c.host?.name || '',
         volumePercentuale: c.config?.volume?.percent ?? 100,
         muto: c.config?.volume?.muted ?? false,
         latenzaMs: c.config?.latency ?? 0,
+        ...(c.host?.ip ? { indirizzo: c.host.ip } : {}),
       })
     }
   }

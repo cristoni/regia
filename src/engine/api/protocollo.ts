@@ -15,6 +15,12 @@
  */
 import { z } from 'zod'
 
+import type {
+  ImpostazioniAudio,
+  ImpostazioniRegistrazione,
+  ImpostazioniServer,
+} from '../dominio/progetto.js'
+
 // ------------------------------------------------------------- Comandi
 
 const conZona = { zonaId: z.string() }
@@ -108,7 +114,51 @@ export const zComando = z.discriminatedUnion('tipo', [
   z.object({ tipo: z.literal('server.riavvia') }),
   /** Forza la riconciliazione completa: client audio e Telecamere (§3.10). */
   z.object({ tipo: z.literal('ricollegaTutto') }),
-  z.object({ tipo: z.literal('impostazioni.audio'), bufferMs: z.number().int().optional(), codec: z.string().optional() }),
+  /** Rilegge l'ambiente per il Setup guidato: WSL, ffmpeg, porte, indirizzi. */
+  z.object({ tipo: z.literal('ambiente.controlla') }),
+
+  // --- Progetto e impostazioni (Setup)
+  z.object({ tipo: z.literal('progetto.rinomina'), nome: z.string().min(1).max(60) }),
+  z.object({ tipo: z.literal('progetto.esporta'), percorso: z.string().min(1) }),
+  z.object({ tipo: z.literal('progetto.importa'), percorso: z.string().min(1) }),
+
+  /**
+   * Ogni campo e opzionale: l'interfaccia manda solo cio che ha cambiato.
+   * Cambiare qualunque di questi ricostruisce la configurazione di snapserver,
+   * quindi durante l'Evento e vietato -- ma l'interfaccia lo scoraggia, non il
+   * motore: un rifiuto qui costerebbe piu di un errore dell'Operatore.
+   */
+  z.object({
+    tipo: z.literal('impostazioni.audio'),
+    bufferMs: z.number().int().min(200).max(4000).optional(),
+    codec: z.enum(['pcm', 'opus', 'flac', 'ogg']).optional(),
+    bloccoMs: z.number().int().min(5).max(100).optional(),
+    dissolvenzaMs: z.number().int().min(0).max(200).optional(),
+    anticipoMs: z.number().int().min(0).max(1000).optional(),
+    idleThresholdMs: z.number().int().min(10).max(10000).optional(),
+    portaBaseFlussi: z.number().int().min(1024).max(65000).optional(),
+  }),
+  z.object({
+    tipo: z.literal('impostazioni.server'),
+    distro: z.string().min(1).optional(),
+    portaControllo: z.number().int().min(1).max(65535).optional(),
+    portaHttp: z.number().int().min(1).max(65535).optional(),
+    portaFlussoClient: z.number().int().min(1).max(65535).optional(),
+  }),
+  z.object({
+    tipo: z.literal('impostazioni.registrazione'),
+    cartella: z.string().min(1).optional(),
+    minutiSegmento: z.number().int().min(1).max(120).optional(),
+    conAudio: z.boolean().optional(),
+    avvisoSpazioGb: z.number().min(0).optional(),
+    bloccoSpazioGb: z.number().min(0).optional(),
+  }),
+  /** Apre la cartella delle registrazioni nell'esplora risorse. */
+  z.object({ tipo: z.literal('registrazione.apriCartella') }),
+  /** Suono di prova su tutti gli Altoparlanti di una Zona (§3.8, passo 6). */
+  z.object({ tipo: z.literal('zona.provaAudio'), ...conZona }),
+  /** Scrive il diario tecnico su file, per l'assistenza (§3.10). */
+  z.object({ tipo: z.literal('diario.esporta'), percorso: z.string().min(1) }),
 ])
 export type Comando = z.infer<typeof zComando>
 
@@ -147,6 +197,27 @@ export interface ZonaViva {
   readonly telecamereTotali: number
   /** Millisecondi di Flusso persi per riallineamento. Sopra zero e un sintomo. */
   readonly buchiMs: number
+  /** `null` = tutta la libreria. La schermata Zone ha bisogno di distinguerlo. */
+  readonly suoniAbilitati: readonly string[] | null
+  /** Lo stream Snapcast che serve questa Zona, per la diagnostica. */
+  readonly flusso: string
+  /**
+   * Come sta lo scrittore di questo Flusso (§3.10).
+   *
+   * `attivo` e l'unico stato in cui esce audio. Gli altri tre sono diagnostica
+   * vera: `in collegamento` per minuti significa che il server non c'e o non
+   * accetta, `caduto` che la socket e morta, `fermo` che il Flusso non e
+   * nemmeno partito.
+   */
+  readonly scrittore: 'fermo' | 'in collegamento' | 'attivo' | 'caduto'
+  /**
+   * Di quanto il Flusso e avanti all'orologio, in millisecondi.
+   *
+   * Positivo e giusto: si scrive in anticipo apposta. Negativo significa che si
+   * sta rimanendo indietro, ed e il sintomo che ha portato mixer e scrittori
+   * nel thread audio.
+   */
+  readonly scartoMs: number
 }
 
 export interface AltoparlanteVivo {
@@ -174,6 +245,25 @@ export interface TelecameraViva {
   readonly inRegistrazione: boolean
   readonly fpsAnteprima: number | null
   readonly vistoIl: string | null
+  readonly https: boolean
+  readonly utente: string | null
+  /** Non la password: solo se ce n'e una. Le password non escono dal motore (§6). */
+  readonly conPassword: boolean
+  /**
+   * Cio che il telefono racconta di se in `/info.json`, gia tradotto.
+   * `null` finche non lo si e sentito almeno una volta.
+   */
+  readonly dettagli: {
+    readonly torcia: boolean
+    readonly haFlash: boolean
+    readonly risoluzione: string | null
+    readonly fps: number | null
+    readonly obiettivo: string | null
+    readonly obiettiviDisponibili: readonly string[]
+    readonly risoluzioniDisponibili: readonly string[]
+  } | null
+  /** Vero mentre la torcia lampeggia per Identifica. */
+  readonly inIdentificazione: boolean
 }
 
 export interface StatoRegistrazione {
@@ -184,19 +274,62 @@ export interface StatoRegistrazione {
   readonly cartella: string
 }
 
+export interface SuonoVivo {
+  readonly id: string
+  readonly nome: string
+  readonly colore: string
+  readonly categoria: string | null
+  readonly durataMs: number | null
+  readonly tastoRapido: string | null
+  readonly pronto: boolean
+  readonly guadagno: number
+}
+
+/**
+ * Cio che il Setup guidato ha bisogno di sapere della macchina.
+ *
+ * Non si ricontrolla dieci volte al secondo: e una fotografia, rifatta su
+ * richiesta e all'avvio. Il campo `controllatoIl` dice quanto e vecchia --
+ * mostrare "porte libere" da mezz'ora fa come se fosse adesso sarebbe peggio
+ * che non mostrare niente.
+ */
+export interface AmbienteVivo {
+  readonly wsl: 'ok' | 'assente' | 'senza distro' | 'sconosciuto'
+  readonly distro: string | null
+  /** Versione trovata dentro la distro, o `null` se snapserver non c'e. */
+  readonly snapserver: string | null
+  readonly ffmpeg: string | null
+  readonly porteOccupate: readonly number[]
+  readonly indirizzi: readonly {
+    readonly interfaccia: string
+    readonly ip: string
+    readonly senzaFili: boolean
+  }[]
+  readonly controllatoIl: string | null
+}
+
 export interface Stato {
   readonly progettoNome: string
   readonly server: StatoServer
   readonly zone: readonly ZonaViva[]
   readonly altoparlanti: readonly AltoparlanteVivo[]
   readonly telecamere: readonly TelecameraViva[]
-  readonly suoni: readonly {
-    readonly id: string; readonly nome: string; readonly colore: string
-    readonly categoria: string | null; readonly durataMs: number | null
-    readonly tastoRapido: string | null; readonly pronto: boolean
-  }[]
+  readonly suoni: readonly SuonoVivo[]
   readonly registrazione: StatoRegistrazione
   readonly audio: { readonly bufferMs: number; readonly codec: string; readonly bandaMbit: number }
+  /**
+   * Le impostazioni per intero, per la schermata Impostazioni e per il Setup.
+   * Sono una trentina di numeri che cambiano quasi mai: costano meno di un
+   * meccanismo di richiesta e risposta per andarsele a prendere.
+   */
+  readonly impostazioni: {
+    readonly audio: ImpostazioniAudio
+    readonly server: ImpostazioniServer
+    readonly registrazione: ImpostazioniRegistrazione
+  }
+  readonly ambiente: AmbienteVivo
+  /** Latenza attesa fra pressione e suono: `bufferMs + anticipoMs` (§8.3). */
+  readonly latenzaAttesaMs: number
   /** Avvisi persistenti da mostrare nella barra di stato (§3.10). */
   readonly avvisi: readonly { readonly livello: 'info' | 'attenzione' | 'grave'; readonly testo: string }[]
 }
@@ -217,33 +350,8 @@ export type Evento =
  * I fotogrammi video non passano da JSON. Viaggiano come messaggi binari con
  * un'intestazione minima davanti, per non pagare la codifica base64 su 6 flussi.
  *
- *   byte 0        1 = chunk video
- *   byte 1        1 = fotogramma chiave (IDR), 0 = differenziale
- *   byte 2-3      lunghezza dell'identificativo di Telecamera, big endian
- *   byte 4..      identificativo in UTF-8
- *   poi           H.264 Annex-B grezzo, cosi com'e arrivato dal telefono
+ * Il telaio vero e in `telaio-video.ts`, perche lo importa anche l'interfaccia,
+ * che gira in un browser e non ha ne Zod ne `Buffer`. Qui si ri-esporta perche
+ * chi legge il protocollo se lo aspetta qui.
  */
-export const MARCA_VIDEO = 1
-
-export function impacchettaVideo(telecameraId: string, chiave: boolean, dati: Uint8Array): Buffer {
-  const id = Buffer.from(telecameraId, 'utf8')
-  const testa = Buffer.allocUnsafe(4 + id.length)
-  testa.writeUInt8(MARCA_VIDEO, 0)
-  testa.writeUInt8(chiave ? 1 : 0, 1)
-  testa.writeUInt16BE(id.length, 2)
-  id.copy(testa, 4)
-  return Buffer.concat([testa, dati], testa.length + dati.length)
-}
-
-export function spacchettaVideo(
-  b: Uint8Array,
-): { telecameraId: string; chiave: boolean; dati: Uint8Array } | null {
-  if (b.length < 4 || b[0] !== MARCA_VIDEO) return null
-  const lunghezza = (b[2]! << 8) | b[3]!
-  if (b.length < 4 + lunghezza) return null
-  return {
-    telecameraId: Buffer.from(b.subarray(4, 4 + lunghezza)).toString('utf8'),
-    chiave: b[1] === 1,
-    dati: b.subarray(4 + lunghezza),
-  }
-}
+export { MARCA_VIDEO, impacchettaVideo, spacchettaVideo } from './telaio-video.js'

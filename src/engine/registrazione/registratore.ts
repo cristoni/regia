@@ -1,0 +1,445 @@
+/**
+ * La registrazione video: ffmpeg che impacchetta i byte gia in casa.
+ *
+ * **ffmpeg non contatta mai il telefono** (ADR 0009). I byte arrivano
+ * dall'unica connessione a `/video/h264` che il gestore delle Telecamere tiene
+ * aperta, e qui si limitano a finire nello stdin di un ffmpeg con `-c:v copy`:
+ * nessuna ricodifica del video, e a parlare col telefono e sempre e solo il
+ * motore.
+ *
+ * Con l'audio acceso (§3.7) il telefono riceve una seconda connessione, su
+ * `/audio`: la apre il gestore delle Telecamere, non ffmpeg. Quei campioni non
+ * arrivano pero direttamente al secondo ingresso -- ci sta in mezzo la
+ * `PompaAudio`, e la ragione e nel suo file: un ingresso che tace blocca
+ * ffmpeg, e accendere l'audio non deve poter far perdere il video.
+ *
+ * Tre vincoli misurati che sembrano dettagli:
+ *
+ *  - **Il binario dev'essere quello in bundle.** L'`ffmpeg` del PATH puo essere
+ *    uno shim che lancia il vero ffmpeg come figlio: `kill()` uccide lo shim e
+ *    lascia il vero ffmpeg orfano, che continua a scrivere su un file che Regia
+ *    crede chiuso.
+ *  - **Si chiude con `stdin.end()`, mai con `kill()`**, o il `moov` non viene
+ *    scritto e il file non si apre. Il §8.6 chiede che si aprano in VLC e in
+ *    Windows Media Player.
+ *  - **Niente `-r` sull'input**: forza il CFR e sbaglia la durata quando la
+ *    sorgente devia dal nominale (verificato: 20 secondi reali diventati un file
+ *    da 8).
+ */
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
+
+import type { Progetto } from '../dominio/progetto.js'
+import { trovaFfmpeg } from '../media/ffmpeg.js'
+import { CANALI_AUDIO, FREQUENZA_AUDIO, PompaAudio } from './pompa-audio.js'
+import type { GestoreTelecamere } from '../telecamere/gestore.js'
+
+export interface OpzioniRegistratore {
+  readonly progetto: () => Progetto
+  readonly suDiario: (livello: 'info' | 'attenzione' | 'grave', testo: string) => void
+  readonly telecamere: GestoreTelecamere
+}
+
+export interface FileRegistrato {
+  readonly nome: string
+  readonly byte: number
+  readonly quando: string
+}
+
+export interface StatoRegistratore {
+  /** Gli identificativi delle Telecamere che stanno registrando. */
+  readonly telecamere: readonly string[]
+  readonly spazioLiberoGb: number
+}
+
+interface InCorso {
+  ffmpeg: ChildProcessWithoutNullStreams | null
+  stacca: () => void
+  /** Vero mentre si aspetta che il telefono torni: REC resta acceso (§3.7). */
+  inAttesa: boolean
+  chiudendo: boolean
+  /** La pompa del secondo ingresso, se si registra anche l'audio. */
+  pompa: PompaAudio | null
+  /** La porta su cui ffmpeg va a prendersi l'audio. */
+  portaAudio: number | null
+  /** Chiude `/audio` sul telefono. */
+  staccaAudio: () => void
+}
+
+/** Ogni quanto si ricontrolla lo spazio libero. */
+const CADENZA_SPAZIO_MS = 10_000
+
+/**
+ * Le lamentele che ffmpeg fa **sempre** quando entra in un flusso H.264 gia
+ * cominciato, e che smettono da sole al primo fotogramma chiave.
+ *
+ * Succede a ogni ripresa dopo una caduta del Wi-Fi (§3.7): i byte ricominciano
+ * a meta di un NAL e il decodificatore non ha ancora visto SPS e PPS. Misurato:
+ * una ventina di righe per ripresa. Nel Diario -- che il §3.10 vuole leggibile
+ * dall'Operatore -- sarebbero venti allarmi su cui non c'e niente da fare,
+ * mescolati a quello vero.
+ */
+const RUMORE_DI_AVVIO = /non-existing PPS|decode_slice_header error|no frame!|Last message repeated/
+
+export class Registratore {
+  private readonly attive = new Map<string, InCorso>()
+  private spazioGb = 0
+  private battito: NodeJS.Timeout | null = null
+
+  constructor(private readonly opzioni: OpzioniRegistratore) {}
+
+  avvia(): void {
+    if (this.battito) return
+    this.battito = setInterval(() => void this.misuraSpazio(), CADENZA_SPAZIO_MS)
+    this.battito.unref?.()
+    void this.misuraSpazio()
+  }
+
+  stato(): StatoRegistratore {
+    return { telecamere: [...this.attive.keys()], spazioLiberoGb: this.spazioGb }
+  }
+
+  // ------------------------------------------------------------- comandi
+
+  async accendi(telecameraId: string): Promise<void> {
+    if (this.attive.has(telecameraId)) return
+
+    const p = this.opzioni.progetto()
+    const t = p.telecamere.find((x) => x.id === telecameraId)
+    if (!t) throw new Error(`Telecamera inesistente: ${telecameraId}`)
+
+    const ff = trovaFfmpeg()
+    if (!ff) {
+      throw new Error('ffmpeg non trovato: la registrazione ha bisogno del binario in bundle')
+    }
+    await this.misuraSpazio()
+    if (this.spazioGb > 0 && this.spazioGb < p.registrazione.bloccoSpazioGb) {
+      throw new Error(
+        `spazio su disco insufficiente (${this.spazioGb.toFixed(1)} GB): la registrazione e bloccata`,
+      )
+    }
+    if (!ff.inBundle) {
+      this.opzioni.suDiario(
+        'attenzione',
+        'ffmpeg viene dal PATH e non dal bundle: se e uno shim, fermare la registrazione ' +
+          'potrebbe lasciare un processo orfano.',
+      )
+    }
+
+    await fs.mkdir(p.registrazione.cartella, { recursive: true })
+
+    const inCorso: InCorso = {
+      ffmpeg: null,
+      stacca: () => {},
+      inAttesa: false,
+      chiudendo: false,
+      pompa: null,
+      portaAudio: null,
+      staccaAudio: () => {},
+    }
+
+    // La pompa si apre **prima** di ffmpeg: ffmpeg si collega a lei appena
+    // parte, e se non trovasse nessuno in ascolto morirebbe subito portandosi
+    // via anche il video.
+    if (p.registrazione.conAudio) {
+      try {
+        const pompa = new PompaAudio()
+        const porta = await pompa.apri()
+        inCorso.pompa = pompa
+        inCorso.portaAudio = porta
+        inCorso.staccaAudio = this.opzioni.telecamere.apriAudio(telecameraId, {
+          byte: (d) => pompa.campioni(d),
+          caduto: (motivo) => {
+            // Non e un motivo per fermare la registrazione: la pompa continua a
+            // scrivere silenzio e il video prosegue. Se sparisce anche il
+            // video, se ne accorge l'altro ascoltatore.
+            this.opzioni.suDiario(
+              'attenzione',
+              `Audio di "${t.nome}" interrotto (${motivo}): il video continua, la traccia prosegue in silenzio.`,
+            )
+          },
+        })
+      } catch (e) {
+        // Meglio registrare senza audio che non registrare: il §3.7 chiede il
+        // video, l'audio e un'opzione.
+        inCorso.pompa = null
+        this.opzioni.suDiario(
+          'attenzione',
+          `Non sono riuscito ad aprire l'audio di "${t.nome}" (${(e as Error).message}). Registro solo il video.`,
+        )
+      }
+    }
+
+    this.attive.set(telecameraId, inCorso)
+
+    inCorso.stacca = this.opzioni.telecamere.ascoltaByte(telecameraId, {
+      byte: (d) => {
+        if (inCorso.chiudendo) return
+        // La ripresa dopo una caduta si riconosce dai byte che ricominciano ad
+        // arrivare: il gestore delle Telecamere non manda un avviso di ripresa,
+        // e non ne serve uno -- questo *e* l'avviso.
+        if (!inCorso.ffmpeg && inCorso.inAttesa) {
+          this.apriFfmpeg(telecameraId, inCorso)
+          this.opzioni.suDiario('info', `Registrazione di "${t.nome}" ripresa su un file nuovo.`)
+        }
+        const f = inCorso.ffmpeg
+        if (!f || f.stdin.destroyed) return
+        // Da qui in poi i due ingressi corrono insieme: ffmpeg normalizza ogni
+        // ingresso a partire dal proprio primo pacchetto, quindi farli
+        // cominciare nello stesso istante e cio che tiene l'audio in sincrono
+        // col video invece che avanti di un secondo.
+        inCorso.pompa?.avvia()
+        // Contropressione ignorata di proposito: la sorgente e un telefono a
+        // ~1,5 Mbit/s e la destinazione e un disco locale. Se davvero non
+        // stesse dietro, accumulare in memoria sarebbe comunque meglio che
+        // perdere fotogrammi in mezzo a un file.
+        f.stdin.write(Buffer.from(d))
+      },
+      caduto: (motivo) => {
+        if (inCorso.chiudendo) return
+        // Il file si chiude bene e resta leggibile; REC resta acceso e riparte
+        // su un file nuovo quando il telefono torna. E alla lettera il §3.7.
+        this.opzioni.suDiario(
+          'attenzione',
+          `Registrazione di "${t.nome}" interrotta (${motivo}): chiudo il file, riprendo appena torna.`,
+        )
+        this.chiudiFfmpeg(inCorso)
+        inCorso.inAttesa = true
+      },
+    })
+
+    this.apriFfmpeg(telecameraId, inCorso)
+    this.opzioni.suDiario('info', `REC acceso su "${t.nome}".`)
+  }
+
+  async spegni(telecameraId: string): Promise<void> {
+    const inCorso = this.attive.get(telecameraId)
+    if (!inCorso) return
+    this.attive.delete(telecameraId)
+    inCorso.chiudendo = true
+    inCorso.stacca()
+    inCorso.staccaAudio()
+    await this.chiudiFfmpeg(inCorso)
+    if (inCorso.pompa) {
+      const silenzio = Math.round(inCorso.pompa.silenzioInventatoMs / 1000)
+      await inCorso.pompa.chiudi()
+      if (silenzio > 1) {
+        this.opzioni.suDiario(
+          'info',
+          `Nella traccia audio ci sono ${silenzio} s di silenzio: tanto e mancato dal telefono.`,
+        )
+      }
+    }
+    const t = this.opzioni.progetto().telecamere.find((x) => x.id === telecameraId)
+    this.opzioni.suDiario('info', `REC spento su "${t?.nome ?? telecameraId}".`)
+  }
+
+  /** Le Telecamere di una Zona, o tutte. Un guasto su una non ferma le altre. */
+  async accendiMolte(ids: readonly string[]): Promise<void> {
+    const errori: string[] = []
+    for (const id of ids) {
+      try {
+        await this.accendi(id)
+      } catch (e) {
+        errori.push((e as Error).message)
+      }
+    }
+    if (errori.length > 0 && errori.length === ids.length) throw new Error(errori[0]!)
+    for (const e of errori) this.opzioni.suDiario('attenzione', e)
+  }
+
+  async spegniMolte(ids: readonly string[]): Promise<void> {
+    for (const id of ids) await this.spegni(id)
+  }
+
+  async chiudi(): Promise<void> {
+    if (this.battito) clearInterval(this.battito)
+    this.battito = null
+    for (const id of [...this.attive.keys()]) await this.spegni(id)
+  }
+
+  /** L'elenco dei file registrati, per la schermata Registrazioni (§3.7). */
+  async elenco(): Promise<FileRegistrato[]> {
+    const cartella = this.opzioni.progetto().registrazione.cartella
+    let nomi: string[]
+    try {
+      nomi = await fs.readdir(cartella)
+    } catch {
+      return []
+    }
+    const fuori: FileRegistrato[] = []
+    for (const nome of nomi) {
+      if (!/\.(mp4|mkv)$/i.test(nome)) continue
+      try {
+        const s = await fs.stat(path.join(cartella, nome))
+        fuori.push({ nome, byte: s.size, quando: s.mtime.toISOString() })
+      } catch {
+        /* sparito fra readdir e stat: succede, non e un errore */
+      }
+    }
+    return fuori.sort((a, b) => b.quando.localeCompare(a.quando))
+  }
+
+  // ------------------------------------------------------------- interni
+
+  private apriFfmpeg(telecameraId: string, inCorso: InCorso): void {
+    const p = this.opzioni.progetto()
+    const t = p.telecamere.find((x) => x.id === telecameraId)
+    if (!t) return
+    const ff = trovaFfmpeg()
+    if (!ff) return
+
+    const zona = p.zone.find((z) => z.id === t.zonaId)
+    const modello = path.join(
+      p.registrazione.cartella,
+      `${pulisci(zona?.nome ?? 'senza-zona')}_${pulisci(t.nome)}_%Y%m%d_%H%M%S.mp4`,
+    )
+
+    const argomenti = [
+      '-hide_banner',
+      '-loglevel', 'warning',
+      // I byte grezzi non portano orologio: senza questo ffmpeg assumerebbe 25
+      // fps nominali e il girato scorrerebbe a velocita sbagliata. Datare
+      // all'arrivo e l'unica misura del tempo che esiste davvero qui.
+      '-use_wallclock_as_timestamps', '1',
+      '-f', 'h264',
+      '-i', 'pipe:0',
+      // Il secondo ingresso e la pompa, non il telefono: ffmpeg si collega a
+      // una socket che Regia serve, e da li escono campioni **sempre**, anche
+      // quando il telefono tace. Un ingresso che si ferma bloccherebbe anche
+      // la scrittura del video.
+      ...(inCorso.portaAudio === null
+        ? []
+        : [
+            '-f', 's16le',
+            '-ar', String(FREQUENZA_AUDIO),
+            '-ac', String(CANALI_AUDIO),
+            '-i', `tcp://127.0.0.1:${inCorso.portaAudio}`,
+            '-map', '0:v',
+            '-map', '1:a',
+          ]),
+      // Il video non si ricodifica mai (§3.7). L'audio si', perche il PCM
+      // grezzo in un MP4 non e riproducibile ovunque e pesa dieci volte tanto.
+      '-c:v', 'copy',
+      ...(inCorso.portaAudio === null ? [] : ['-c:a', 'aac', '-b:a', '96k']),
+      '-fps_mode', 'passthrough',
+      // La suddivisione la fa ffmpeg: ogni segmento si chiude da solo e resta
+      // leggibile, e un crash costa al massimo un segmento (§3.7).
+      '-f', 'segment',
+      '-segment_time', String(p.registrazione.minutiSegmento * 60),
+      '-segment_format', 'mp4',
+      '-reset_timestamps', '1',
+      '-strftime', '1',
+      modello,
+    ]
+
+    const f = spawn(ff.percorso, argomenti, { windowsHide: true })
+    inCorso.ffmpeg = f
+    inCorso.inAttesa = false
+
+    // Lo stderr di ffmpeg arriva a pezzi che non coincidono con le righe: senza
+    // ricomporlo il Diario si riempie di mezze parole ("Last message repeated 1
+    // tim" / "es"). Si accumula e si taglia sui ritorni a capo.
+    let resto = ''
+    let scartate = 0
+    f.stderr.on('data', (d: Buffer) => {
+      resto += d.toString('utf8')
+      const righe = resto.split(/\r?\n/)
+      resto = righe.pop() ?? ''
+      for (const riga of righe) {
+        const testo = riga.trim()
+        if (!testo) continue
+        if (RUMORE_DI_AVVIO.test(testo)) {
+          scartate++
+          continue
+        }
+        this.opzioni.suDiario('attenzione', `ffmpeg (${t.nome}): ${testo.slice(0, 200)}`)
+      }
+    })
+    f.on('close', () => {
+      if (scartate === 0) return
+      // Non e un guasto e non c'e niente da fare: ffmpeg entra nel flusso a
+      // meta e si lamenta finche non arriva il primo fotogramma chiave, che
+      // sul telefono arriva entro un secondo. Una riga sola, per dire che e
+      // successo e che e finito.
+      this.opzioni.suDiario(
+        'info',
+        `Registrazione di "${t.nome}": ${scartate} righe di ffmpeg prima del primo ` +
+          'fotogramma chiave, normali su un flusso preso a meta.',
+      )
+    })
+    f.stdin.on('error', () => {
+      /* lo stdin si chiude quando ffmpeg esce: non e un guasto */
+    })
+    f.on('error', (e) => {
+      this.opzioni.suDiario('grave', `ffmpeg non e partito per "${t.nome}": ${e.message}`)
+      inCorso.ffmpeg = null
+    })
+    f.on('exit', (codice) => {
+      if (inCorso.ffmpeg === f) inCorso.ffmpeg = null
+      if (codice !== 0 && !inCorso.chiudendo) {
+        this.opzioni.suDiario('attenzione', `ffmpeg per "${t.nome}" e uscito con ${codice}.`)
+      }
+      // Se la registrazione e ancora accesa e non stiamo chiudendo, il flusso
+      // tornera e con lui i byte: si riapre allora, non adesso.
+      if (this.attive.get(telecameraId) === inCorso && !inCorso.chiudendo) inCorso.inAttesa = true
+    })
+  }
+
+  /**
+   * Chiude ffmpeg **bene**: stdin, e poi si aspetta che esca da solo.
+   *
+   * `kill()` lascerebbe un MP4 senza `moov`, cioe un file che nessun lettore
+   * apre. Se dopo cinque secondi non e uscito lo si ammazza comunque, ma quel
+   * file e da considerarsi perso e lo si dice.
+   */
+  private chiudiFfmpeg(inCorso: InCorso): Promise<void> {
+    const f = inCorso.ffmpeg
+    inCorso.ffmpeg = null
+    // Prima si chiude il secondo ingresso, poi si aspetta: ffmpeg esce quando
+    // finiscono tutti i suoi ingressi, non solo lo stdin. Misurato: senza
+    // questa riga non usciva mai, lo si ammazzava dopo cinque secondi e il
+    // file restava senza `moov`.
+    inCorso.pompa?.staccaFfmpeg()
+    if (!f) return Promise.resolve()
+
+    return new Promise<void>((ok) => {
+      const scadenza = setTimeout(() => {
+        this.opzioni.suDiario(
+          'grave',
+          'ffmpeg non si e chiuso da solo: il file potrebbe non essere leggibile.',
+        )
+        f.kill()
+        ok()
+      }, 5000)
+      scadenza.unref?.()
+      f.once('exit', () => {
+        clearTimeout(scadenza)
+        ok()
+      })
+      if (!f.stdin.destroyed) f.stdin.end()
+    })
+  }
+
+  private async misuraSpazio(): Promise<void> {
+    const cartella = this.opzioni.progetto().registrazione.cartella
+    try {
+      const s = await fs.statfs(cartella)
+      this.spazioGb = (s.bavail * s.bsize) / 1e9
+    } catch {
+      // La cartella potrebbe non esistere ancora: si guarda quella sopra.
+      try {
+        const s = await fs.statfs(path.parse(cartella).root)
+        this.spazioGb = (s.bavail * s.bsize) / 1e9
+      } catch {
+        this.spazioGb = 0
+      }
+    }
+  }
+}
+
+/** Un nome di Zona o di Telecamera dentro un nome di file. */
+function pulisci(nome: string): string {
+  return nome.replace(/[^\p{L}\p{N} _-]+/gu, '').replace(/\s+/g, '-').slice(0, 30) || 'senza-nome'
+}

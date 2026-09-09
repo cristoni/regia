@@ -92,6 +92,32 @@ mescolati insieme, silenzio digitale quando non c'è nulla da suonare. Non si fe
 l'evento è in corso. Uno per Zona.
 _Evita_: stream, canale, mix, uscita
 
+### Le schermate
+
+**Produzione**:
+La schermata dell'Evento: le anteprime video in alto, sotto un riquadro per Zona con i pulsanti
+dei Suoni, il volume e lo STOP. Tutto ciò che serve mentre i visitatori sono dentro sta qui, e
+niente di ciò che sta qui apre una finestra che blocca.
+_Evita_: dashboard, live, main
+
+**Setup guidato**:
+La sequenza di sette passi che porta dal PC acceso alla Casa pronta. Non blocca e non ha un
+ordine obbligatorio: è l'elenco delle cose che a fine pomeriggio si vogliono aver guardato, con
+accanto il pulsante che le fa.
+_Evita_: wizard, procedura, installazione
+
+**Diario**:
+Le righe leggibili dall'Operatore su cosa è successo: un Altoparlante sparito, un Suono
+importato, uno STOP TUTTO. È diverso dagli **Avvisi**, che sono le poche cose ancora vere adesso
+e stanno nella barra di stato.
+_Evita_: log, cronologia, eventi
+
+**Ponte**:
+Il passaggio che Regia apre da sé perché i telefoni raggiungano il server audio quando WSL
+espone le porte solo sul PC. Si accende da solo se serve e resta invisibile — tranne in un punto:
+un Altoparlante che passa dal Ponte non mostra il proprio indirizzo, ma la parola "via ponte".
+_Evita_: proxy, tunnel, forward
+
 ## Ambiguità aperte
 
 - **Suono vs. Effetto vs. Sottofondo** — un Suono è ciò che sta nella libreria; diventa Effetto o
@@ -100,6 +126,10 @@ _Evita_: stream, canale, mix, uscita
 - **Zona vs. gruppo/stream Snapcast** — "gruppo" e "stream" sono termini di Snapcast, non
   del dominio. Nel codice e nelle conversazioni si dice sempre **Zona**; "gruppo" e "stream"
   compaiono solo dove si parla letteralmente del protocollo Snapcast.
+- **Identifica su un Altoparlante vs. su una Telecamera** — è la stessa azione e si chiama allo
+  stesso modo, ma si manifesta in due modi diversi: un suono breve nel primo caso, due secondi di
+  torcia nel secondo. Non si dice "Identifica audio" e "Identifica video": si dice Identifica, e
+  quale sia lo dice il dispositivo.
 
 ## Come si parla, in pratica
 

@@ -329,3 +329,141 @@ describe('scrittore: il contenuto e davvero il mix', () => {
     assert.equal(b.scrittore.diagnostica().byteScritti, b.prese[0]!.byteTotali)
   })
 })
+
+/**
+ * La trappola dell'`async_accept`, riprodotta.
+ *
+ * Snapserver in `mode=server` accetta **una sola** connessione per porta e non
+ * ne posta un'altra finche quella non muore; il kernel pero completa lo
+ * handshake delle successive e le parcheggia. Una socket parcheggiata sembra
+ * viva, accetta byte finche il buffer non e pieno, e poi non si scarica **mai**.
+ *
+ * Costava caro: lo scrittore restava fermo dentro `attendiScarico()`, `ferma()`
+ * lo aspettava, `configura` aspettava `ferma()`, e la coda del thread audio si
+ * bloccava per sempre. Il sintomo era un Suono importato che non finiva mai di
+ * importarsi -- a chilometri di distanza dalla causa.
+ */
+class PresaParcheggiata implements Destinazione {
+  aperta = true
+  byteTotali = 0
+  chiusure = 0
+
+  scrivi(dati: Uint8Array): boolean {
+    if (!this.aperta) throw new Error('scritto su una presa chiusa')
+    this.byteTotali += dati.length
+    return false // sempre contropressione: la coda non si svuota mai
+  }
+
+  /** Non si risolve mai, come una socket che nessuno legge. */
+  attendiScarico(): Promise<void> {
+    return new Promise<void>(() => {})
+  }
+
+  async chiudi(): Promise<void> {
+    this.chiusure++
+    this.aperta = false
+  }
+}
+
+describe('scrittore: la socket che nessuno legge', () => {
+  function bancoParcheggiato() {
+    const audio = { ...AUDIO }
+    const mixer = new MixerZona(audio)
+    const prese: PresaParcheggiata[] = []
+    const diagnostiche: string[] = []
+    const scrittore = new Scrittore({
+      impostazioni: audio,
+      mixer,
+      collega: async () => {
+        const p = new PresaParcheggiata()
+        prese.push(p)
+        return p
+      },
+      attesaRiprovaMs: 5,
+      // Tempo vero, non timeline audio: in un test si tiene corto.
+      attesaScaricoMs: 30,
+      suDiagnostica: (m) => diagnostiche.push(m),
+    })
+    return { scrittore, prese, diagnostiche }
+  }
+
+  it('si ferma anche mentre aspetta uno scarico che non arrivera mai', async () => {
+    const b = bancoParcheggiato()
+    b.scrittore.avvia()
+    await new Promise((r) => setTimeout(r, 60))
+
+    // Il punto del test e proprio questo `await`: prima della correzione non
+    // tornava mai, e con lui restava fermo tutto il thread audio.
+    await conScadenza(b.scrittore.ferma(), 2000, 'ferma() su una presa parcheggiata')
+    assert.equal(b.scrittore.diagnostica().stato, 'fermo')
+    assert.ok(b.prese.every((p) => !p.aperta), 'ogni presa deve restare chiusa')
+  })
+
+  it('la molla e si ricollega, invece di restarci attaccato', async () => {
+    const b = bancoParcheggiato()
+    b.scrittore.avvia()
+    await new Promise((r) => setTimeout(r, 250))
+    await conScadenza(b.scrittore.ferma(), 2000, 'ferma()')
+
+    assert.ok(b.prese.length > 1, 'doveva mollare la presa muta e riprovare')
+    assert.ok(
+      b.diagnostiche.some((d) => /non si scarica/.test(d)),
+      'e deve dirlo, invece di tacere',
+    )
+  })
+})
+
+function conScadenza<T>(p: Promise<T>, ms: number, cosa: string): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, ko) => {
+      const t = setTimeout(() => ko(new Error(`${cosa}: non e tornato entro ${ms} ms`)), ms)
+      t.unref?.()
+    }),
+  ])
+}
+
+describe('scrittore: fermarsi mentre si sta collegando', () => {
+  /**
+   * Il caso che ha lasciato megabyte in coda su snapserver.
+   *
+   * Fermare uno scrittore proprio mentre la sua `connect()` e in volo: la
+   * connessione nasce comunque, e se nessuno la chiude resta aperta e
+   * abbandonata. Snapserver se la tiene nella coda di accettazione e non la
+   * legge mai; il mixer che le scriveva dentro non esiste piu, ma i byte gia
+   * scritti restano li. Sintomo osservato: `ss` con `Send-Q 2634240` su
+   * connessioni che Regia credeva chiuse, e tutti gli stream fermi a `idle`.
+   */
+  it('non lascia aperta la connessione nata mentre si fermava', async () => {
+    Presa.azzera()
+    const audio = { ...AUDIO }
+    const mixer = new MixerZona(audio)
+    const prese: Presa[] = []
+    let sbloccaCollegamento: (() => void) | null = null
+
+    const scrittore = new Scrittore({
+      impostazioni: audio,
+      mixer,
+      // Un collegamento lento a comando: cosi `ferma()` arriva mentre e in volo.
+      collega: async () => {
+        await new Promise<void>((r) => (sbloccaCollegamento = r))
+        const p = new Presa()
+        prese.push(p)
+        return p
+      },
+      attesaRiprovaMs: 5,
+    })
+
+    scrittore.avvia()
+    // Si aspetta che il ciclo sia davvero dentro `collega()`.
+    while (!sbloccaCollegamento) await new Promise((r) => setImmediate(r))
+
+    const fermata = scrittore.ferma()
+    sbloccaCollegamento()
+    await fermata
+
+    assert.equal(prese.length, 1, 'il collegamento in volo doveva completarsi')
+    assert.equal(prese[0]!.aperta, false, 'e doveva essere chiuso da chi ha fermato')
+    assert.equal(Presa.viveContemporaneamente, 0, 'nessuna presa deve restare viva')
+  })
+})

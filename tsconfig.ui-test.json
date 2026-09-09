@@ -1,0 +1,12 @@
+{
+  // I test dell'interfaccia girano nel test runner di Node, non nel browser:
+  // hanno bisogno dei tipi di Node, che nel progetto dell'interfaccia vera non
+  // devono entrare. Provano solo le derivazioni pure -- il codice che tocca il
+  // DOM non si collauda qui.
+  "extends": "./tsconfig.ui.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src/ui/**/*.test.ts", "src/ui/nucleo/viste.ts", "src/engine/api/protocollo.ts"],
+  "exclude": []
+}

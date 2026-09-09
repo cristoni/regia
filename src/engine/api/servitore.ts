@@ -34,6 +34,52 @@ export interface Motore {
   ): () => void
   /** Righe di diario destinate all'Operatore. */
   ascoltaDiario(ascoltatore: (e: Extract<Evento, { tipo: 'diario' }>) => void): () => void
+  /**
+   * L'unione delle iscrizioni di tutte le connessioni.
+   *
+   * Il motore apre il flusso verso una Telecamera solo se **qualcuno** lo
+   * guarda: sei anteprime aperte in permanenza sono 6-12 Mbit/s continui su una
+   * rete che sta gia portando 11 Mbit/s di PCM. Chiudere una scheda restituisce
+   * banda agli Altoparlanti, e questo e il messaggio che glielo dice.
+   */
+  interessatoVideo?(telecamere: readonly string[]): void
+  /** L'ultimo fotogramma chiave, da mandare subito a chi si iscrive adesso. */
+  ultimoIdr?(telecameraId: string): Uint8Array | null
+  /** L'elenco dei file registrati, servito su `/api/registrazioni`. */
+  elencoRegistrazioni?(): Promise<readonly unknown[]>
+  /**
+   * Un Suono caricato dall'interfaccia, come byte.
+   *
+   * Passa da qui e non da un percorso su disco perche l'interfaccia e una
+   * pagina web: in Electron con `sandbox: true` un `<input type=file>` non da
+   * il percorso vero del file, e il tablet della Fase 3 non ha nemmeno lo
+   * stesso disco. I byte, invece, funzionano da tutti e tre i posti.
+   */
+  importaSuono?(nome: string, dati: Buffer): Promise<void>
+  /** Il progetto in JSON, senza password, per il pulsante "esporta". */
+  esportaProgetto?(): Promise<string>
+  importaProgettoDaTesto?(testo: string): Promise<void>
+}
+
+/** Un corpo di richiesta intero, con un tetto: 200 MB e un Suono lunghissimo. */
+const TETTO_CORPO = 200 << 20
+
+function leggiCorpo(req: IncomingMessage): Promise<Buffer> {
+  return new Promise((risolvi, rifiuta) => {
+    const pezzi: Buffer[] = []
+    let quanti = 0
+    req.on('data', (d: Buffer) => {
+      quanti += d.length
+      if (quanti > TETTO_CORPO) {
+        req.destroy()
+        rifiuta(new Error('file troppo grande'))
+        return
+      }
+      pezzi.push(d)
+    })
+    req.on('end', () => risolvi(Buffer.concat(pezzi)))
+    req.on('error', rifiuta)
+  })
 }
 
 export interface OpzioniServitore {
@@ -97,9 +143,14 @@ export class Servitore {
     this.ws = ws
 
     ws.on('connection', (socket) => this.accogli(socket))
+    // Senza questo, una porta gia occupata **uccide il processo**: il server
+    // WebSocket riemette l'errore del server HTTP, e un evento `error` senza
+    // ascoltatori in Node e un'eccezione non gestita. Il messaggio pulito che
+    // `avvia()` sa produrre non arriverebbe mai a nessuno.
+    ws.on('error', () => {})
 
     this.staccaVideo = this.motore.ascoltaVideo((telecameraId, chiave, dati) => {
-      let pacchetto: Buffer | null = null
+      let pacchetto: Uint8Array | null = null
       for (const c of this.connessioni) {
         if (!c.video.has(telecameraId) || c.socket.readyState !== 1) continue
         // Si impacchetta una volta sola, e solo se qualcuno lo vuole davvero.
@@ -156,8 +207,14 @@ export class Servitore {
       if (binario) return // il canale binario e a senso unico, dal motore in giu
       void this.ricevi(c, dati.toString())
     })
-    socket.on('close', () => this.connessioni.delete(c))
-    socket.on('error', () => this.connessioni.delete(c))
+    socket.on('close', () => {
+      this.connessioni.delete(c)
+      this.aggiornaInteresseVideo()
+    })
+    socket.on('error', () => {
+      this.connessioni.delete(c)
+      this.aggiornaInteresseVideo()
+    })
   }
 
   private async ricevi(c: Connessione, testo: string): Promise<void> {
@@ -178,7 +235,17 @@ export class Servitore {
     }
 
     if (letto.data.tipo === 'video.iscrivi') {
+      const prima = c.video
       c.video = new Set(letto.data.telecamere)
+      this.aggiornaInteresseVideo()
+      // Un fotogramma chiave subito, per ogni Telecamera appena chiesta: senza,
+      // la cella resta nera fino al prossimo IDR, che arriva ogni secondo e non
+      // e configurabile. Ogni IDR e preceduto da SPS e PPS, quindi basta lui.
+      for (const id of c.video) {
+        if (prima.has(id)) continue
+        const idr = this.motore.ultimoIdr?.(id)
+        if (idr && c.socket.readyState === 1) c.socket.send(impacchettaVideo(id, true, idr))
+      }
       return
     }
 
@@ -193,6 +260,19 @@ export class Servitore {
     }
     // Lo stato e cambiato: non aspettare il battito.
     this.trasmettiStato()
+  }
+
+  /**
+   * Ridice al motore quali Telecamere servono davvero, adesso.
+   *
+   * E l'unione, non la somma: due interfacce che guardano la stessa Zona
+   * restano una connessione sola verso il telefono (§4.5).
+   */
+  private aggiornaInteresseVideo(): void {
+    if (!this.motore.interessatoVideo) return
+    const unione = new Set<string>()
+    for (const c of this.connessioni) for (const id of c.video) unione.add(id)
+    this.motore.interessatoVideo([...unione])
   }
 
   private trasmettiStato(): void {
@@ -211,6 +291,55 @@ export class Servitore {
     if (req.url === '/salute') {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, clienti: this.connessioni.size }))
+      return
+    }
+
+    // L'elenco dei file registrati non sta nell'istantanea: sono centinaia di
+    // righe che cambiano una volta ogni dieci minuti, e l'istantanea viaggia
+    // dieci volte al secondo. Si va a prendere quando serve.
+    if (req.url === '/api/registrazioni') {
+      try {
+        const elenco = (await this.motore.elencoRegistrazioni?.()) ?? []
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify(elenco))
+      } catch (e) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ errore: (e as Error).message }))
+      }
+      return
+    }
+
+    if (req.url?.startsWith('/api/suoni') && req.method === 'POST') {
+      const nome = new URL(req.url, 'http://x').searchParams.get('nome') ?? 'suono'
+      try {
+        await this.motore.importaSuono?.(nome, await leggiCorpo(req))
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end('{"ok":true}')
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ errore: (e as Error).message }))
+      }
+      return
+    }
+
+    if (req.url === '/api/progetto') {
+      try {
+        if (req.method === 'POST') {
+          await this.motore.importaProgettoDaTesto?.((await leggiCorpo(req)).toString('utf8'))
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          res.end('{"ok":true}')
+        } else {
+          const testo = (await this.motore.esportaProgetto?.()) ?? '{}'
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': 'attachment; filename="progetto-regia.json"',
+          })
+          res.end(testo)
+        }
+      } catch (e) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ errore: (e as Error).message }))
+      }
       return
     }
 

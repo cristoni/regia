@@ -204,7 +204,7 @@ export function progettoVuoto(cartellaVideo: string): Progetto {
     registrazione: {
       cartella: cartellaVideo,
       minutiSegmento: 10,
-      conAudio: false,
+      conAudio: true,
       avvisoSpazioGb: 20,
       bloccoSpazioGb: 5,
     },

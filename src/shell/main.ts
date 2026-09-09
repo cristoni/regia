@@ -9,9 +9,33 @@
  * browser puntato sulla stessa porta. E il motivo per cui il tablet della Fase 3
  * costa quasi zero.
  */
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { app, BrowserWindow, globalShortcut, Menu, shell } from 'electron'
 
 import { avviaMotore, type MotoreAvviato } from '../engine/index.js'
+
+/**
+ * Dove sono i file compilati dell'interfaccia.
+ *
+ * Si cerca invece di scriverlo una volta sola perche questo file gira da tre
+ * posti diversi -- `src/shell` sotto `tsx`, `dist/shell/shell` dopo `tsc`, e
+ * dentro l'`asar` una volta impacchettato -- e un percorso relativo giusto in
+ * uno dei tre e sbagliato negli altri due, con l'errore che si scopre solo
+ * all'avvio dell'app impacchettata.
+ */
+function cartellaInterfaccia(): string | null {
+  const qui = path.dirname(fileURLToPath(import.meta.url))
+  const candidati = [
+    path.resolve(qui, '../../dist/ui'),
+    path.resolve(qui, '../../../dist/ui'),
+    path.resolve(process.cwd(), 'dist/ui'),
+    path.join(process.resourcesPath ?? '', 'ui'),
+  ]
+  return candidati.find((c) => fs.existsSync(path.join(c, 'index.html'))) ?? null
+}
 
 let motore: MotoreAvviato | null = null
 let finestra: BrowserWindow | null = null
@@ -32,7 +56,13 @@ async function principale(): Promise<void> {
   await app.whenReady()
   Menu.setApplicationMenu(null)
 
-  motore = await avviaMotore()
+  const cartellaUi = cartellaInterfaccia()
+  if (!cartellaUi) {
+    // Meglio dirlo subito e chiaro che aprire una finestra bianca: senza
+    // interfaccia compilata il motore risponde 404 e non si capisce perche.
+    console.error('interfaccia non trovata: esegui "npm run build:ui" prima di avviare Regia.')
+  }
+  motore = await avviaMotore(cartellaUi === null ? {} : { cartellaUi })
 
   finestra = new BrowserWindow({
     width: 1600,

@@ -67,3 +67,14 @@ Restano tre strade, e la scelta va fatta con il telefono in mano, non a tavolino
    configurazione di sistema, ma tutto il traffico audio dei telefoni passa dal nostro processo.
 
 Nessuna e gratis. **La misura 1 di `docs/fatti-verificati.md` decide quale.**
+
+## Correzione, 9 settembre 2026
+
+La misura 1 e stata presa, e la scelta e la **terza**: il ponte sta dentro Regia. Il perche, le due
+alternative scartate e il prezzo che si paga stanno in
+[ADR 0010](0010-il-ponte-di-rete-fa-parte-di-regia.md).
+
+Cade con essa anche la strada 1: **Regia non scrive `.wslconfig`** e non tocca nessuna
+configurazione condivisa del PC. La promessa "nessun contatto con le distro gia presenti" torna
+quindi vera — resta vero, pero, che la distro va scelta in Impostazioni, perche quella predefinita
+di questo ADR (`Regia-Snapserver`) non esiste su una macchina qualsiasi.

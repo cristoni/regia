@@ -5,34 +5,50 @@
  * (ADR 0004): si avvia da qui, dal guscio, o da uno script di collaudo, e in
  * tutti e tre i casi si comporta allo stesso modo.
  *
- * Cosa e collegato oggi: progetto, Zone, libreria dei Suoni, e il **thread
- * audio** che tiene mixer e scrittori. Cosa non lo e ancora: la distro WSL, il
- * JSON-RPC verso snapserver, le Telecamere e la registrazione. Quei comandi
- * rispondono con un errore esplicito invece di far finta -- un motore che dice
- * "non ancora" e utile, uno che finge non lo e.
- *
  * Qui dentro non c'e nessun mixer. Stanno tutti nel thread audio, dietro
  * `MotoreAudio`: e la conseguenza di una misura, non di un gusto. Sul thread
  * principale, sotto carico, lo scrittore restava indietro di oltre mezzo
  * secondo e rinunciava a pezzi di Flusso.
+ *
+ * E non c'e nemmeno nessuna decisione su *come* si fanno le cose: il ciclo di
+ * vita di snapserver sta nel supervisore, le Telecamere nel loro gestore, la
+ * registrazione nel registratore. Questo file e il posto dove il **dominio**
+ * decide -- quali Suoni sono ammessi in una Zona, cosa vuol dire eliminare una
+ * Zona, quando il progetto va salvato -- e null'altro.
  */
 import * as os from 'node:os'
 import * as path from 'node:path'
+import * as fs from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 
 import {
   byteBlocco,
   effettiDellaZona,
   latenzaAttesaMs,
   progettoVuoto,
+  violazioni,
+  zProgetto,
   zoneOrdinate,
   type Progetto,
   type Suono,
+  type Telecamera,
   type Zona,
 } from './dominio/progetto.js'
 import { ArchivioProgetto } from './progetto/archivio.js'
 import { LibreriaSuoni } from './audio/libreria.js'
 import { MotoreAudio } from './audio/motore-audio.js'
-import { flussiDi } from './snapcast/configurazione.js'
+import { AnteprimaSuoni } from './audio/anteprima.js'
+import { SUONO_IDENTIFICA, SUONO_PROVA, scriviSegnali } from './audio/segnali.js'
+import { flussiDi, generaConfigurazione } from './snapcast/configurazione.js'
+import {
+  FLUSSO_NON_ASSEGNATI,
+  SupervisoreSnapcast,
+  chiaveFlussoDi,
+} from './snapcast/supervisore.js'
+import { GestoreTelecamere } from './telecamere/gestore.js'
+import { Registratore, type FileRegistrato } from './registrazione/registratore.js'
+import { Ambiente } from './ambiente.js'
+import { DpapiNonDisponibile, cifra, decifra } from './sicurezza/dpapi.js'
 import { OPZIONI_PREDEFINITE, Servitore, type Motore, type OpzioniServitore } from './api/servitore.js'
 import type { Comando, Evento, Stato, ZonaViva } from './api/protocollo.js'
 
@@ -40,6 +56,8 @@ export interface OpzioniMotore {
   /** Cartella dei dati di Regia: progetto, suoni, cache. */
   readonly cartellaDati: string
   readonly servitore: Partial<OpzioniServitore>
+  /** Cartella dei file compilati dell'interfaccia. `null` = solo API. */
+  readonly cartellaUi: string | null
 }
 
 export interface MotoreAvviato {
@@ -48,21 +66,47 @@ export interface MotoreAvviato {
   ferma(): Promise<void>
 }
 
-class NonAncora extends Error {
-  constructor(cosa: string) {
-    super(`${cosa}: non ancora collegato in questa versione`)
-    this.name = 'NonAncora'
-  }
-}
+/**
+ * Quanto si aspetta prima di riavviare il server dopo un cambio di Zone.
+ *
+ * Rinominare una Zona cambia l'identificativo del suo stream (ADR 0005) e quindi
+ * la configurazione di snapserver. Senza attesa, ogni lettera digitata nel campo
+ * "nome" riavvierebbe il server: si aspetta che l'Operatore abbia finito.
+ */
+const ATTESA_RICONFIGURAZIONE_MS = 900
+
+/** Quante righe di diario si tengono per l'esportazione (§3.10). */
+const RIGHE_DIARIO = 2000
 
 export class MotoreRegia implements Motore {
   private progetto: Progetto
   /** I Suoni che il thread audio ha confermato di avere in memoria. */
   private readonly suoniPronti = new Map<string, number>()
+  private readonly durateSegnali = new Map<string, number>()
   private readonly ascoltatoriVideo: ((id: string, chiave: boolean, d: Uint8Array) => void)[] = []
   private readonly ascoltatoriDiario: ((e: Extract<Evento, { tipo: 'diario' }>) => void)[] = []
   private readonly avvisi: { livello: 'info' | 'attenzione' | 'grave'; testo: string }[] = []
+  private readonly righeDiario: Extract<Evento, { tipo: 'diario' }>[] = []
+  /** Password decifrate, tenute solo in memoria: sul disco stanno cifrate (§6). */
+  private readonly passwordInChiaro = new Map<string, string>()
   private prossimoId = 1
+  private riconfigurazione: NodeJS.Timeout | null = null
+  /**
+   * Dove gli scrittori aprono le socket delle sorgenti.
+   *
+   * Parte da `127.0.0.1` perche finche non si sa l'indirizzo della distro e
+   * l'unica cosa che si puo provare, ma **non e l'indirizzo giusto**: in
+   * `networkingMode=NAT` gli inoltri di WSL su `127.0.0.1` sopravvivono al
+   * processo che ascoltava, accettano connessioni e non leggono niente. Appena
+   * il supervisore sa l'indirizzo vero, si riconfigura.
+   */
+  private hostFlussi = '127.0.0.1'
+
+  readonly server: SupervisoreSnapcast
+  readonly telecamere: GestoreTelecamere
+  readonly registratore: Registratore
+  readonly ambiente = new Ambiente()
+  private readonly anteprima = new AnteprimaSuoni()
 
   constructor(
     progetto: Progetto,
@@ -71,6 +115,41 @@ export class MotoreRegia implements Motore {
     private readonly audio: MotoreAudio,
   ) {
     this.progetto = progetto
+    // Gli identificativi ripartono da oltre il massimo gia nel file: un
+    // progetto riaperto ha gia `z1`..`z8`, e ricominciare da uno li duplicherebbe.
+    this.prossimoId = prossimoIdLibero(progetto)
+
+    this.server = new SupervisoreSnapcast({
+      progetto: () => this.progetto,
+      suDiario: (l, t) => this.diario(l, t),
+      suClientNuovo: (id, nome) => this.accogliAltoparlante(id, nome),
+      suonaIdentifica: (chiave) => {
+        this.audio.suona([chiave], SUONO_IDENTIFICA, 1, false)
+        return this.durateSegnali.get(SUONO_IDENTIFICA) ?? 600
+      },
+      suIndirizzoDistro: (ip) => {
+        if (ip === this.hostFlussi) return
+        this.hostFlussi = ip
+        this.diario('info', `Le sorgenti audio vanno verso la distro, a ${ip}.`)
+        this.riconfiguraAudio()
+      },
+    })
+
+    this.telecamere = new GestoreTelecamere({
+      progetto: () => this.progetto,
+      suDiario: (l, t) => this.diario(l, t),
+      suFotogramma: (id, chiave, dati) => {
+        for (const a of this.ascoltatoriVideo) a(id, chiave, dati)
+      },
+      password: (t) => this.password(t),
+    })
+
+    this.registratore = new Registratore({
+      progetto: () => this.progetto,
+      suDiario: (l, t) => this.diario(l, t),
+      telecamere: this.telecamere,
+    })
+
     this.riconfiguraAudio()
   }
 
@@ -80,12 +159,25 @@ export class MotoreRegia implements Motore {
     return this.progetto
   }
 
+  private get osservati() {
+    return this.server.clienti()
+  }
+  private get identificazioni() {
+    return this.server.inIdentificazione()
+  }
+
   stato(): Stato {
     const a = this.progetto.audio
+    const assegnati = new Map<string, number>()
     const collegati = new Map<string, number>()
     for (const alt of this.progetto.altoparlanti) {
-      if (alt.zonaId) collegati.set(alt.zonaId, (collegati.get(alt.zonaId) ?? 0) + 1)
+      if (!alt.zonaId) continue
+      assegnati.set(alt.zonaId, (assegnati.get(alt.zonaId) ?? 0) + 1)
+      if (this.osservati.get(alt.id)?.collegato) {
+        collegati.set(alt.zonaId, (collegati.get(alt.zonaId) ?? 0) + 1)
+      }
     }
+    const flussi = new Map(flussiDi(this.progetto).map((f) => [f.zonaId, f.id]))
 
     const zone: ZonaViva[] = zoneOrdinate(this.progetto).map((z) => {
       // Lo stato arriva dal thread audio a intervalli regolari: si legge cio
@@ -102,36 +194,65 @@ export class MotoreRegia implements Motore {
         // Con l'identificativo del Suono, non solo il conteggio: e cosi che
         // l'interfaccia sa quale pulsante illuminare (§5.2).
         effettiInCorso: f?.effetti ?? [],
-        altoparlantiCollegati: 0,
-        altoparlantiTotali: collegati.get(z.id) ?? 0,
-        telecamereCollegate: 0,
+        altoparlantiCollegati: collegati.get(z.id) ?? 0,
+        altoparlantiTotali: assegnati.get(z.id) ?? 0,
+        telecamereCollegate: this.progetto.telecamere.filter(
+          (t) => t.zonaId === z.id && this.telecamere.viva(t.id)?.raggiungibile,
+        ).length,
         telecamereTotali: this.progetto.telecamere.filter((t) => t.zonaId === z.id).length,
         buchiMs: f?.buchiMs ?? 0,
+        suoniAbilitati: z.suoniAbilitati,
+        flusso: flussi.get(z.id) ?? '',
+        scrittore: f?.scrittore ?? 'fermo',
+        scartoMs: f?.scartoMs ?? 0,
       }
     })
 
+    const reg = this.registratore.stato()
     return {
       progettoNome: this.progetto.nome,
-      server: 'non installato',
+      server: this.server.stato(),
       zone,
-      altoparlanti: this.progetto.altoparlanti.map((x) => ({
-        id: x.id, nome: x.nome, zonaId: x.zonaId, collegato: false,
-        volume: x.volume, muto: x.muto, latenzaMs: x.latenzaMs,
-        indirizzo: null, vistoIl: x.vistoIl, inIdentificazione: false,
-      })),
-      telecamere: this.progetto.telecamere.map((t) => ({
-        id: t.id, nome: t.nome, zonaId: t.zonaId, host: t.host, porta: t.porta,
-        raggiungibile: false, batteria: null, segnale: null,
-        inRegistrazione: false, fpsAnteprima: null, vistoIl: null,
-      })),
-      suoni: this.progetto.suoni.map((s) => ({
-        id: s.id, nome: s.nome, colore: s.colore, categoria: s.categoria,
-        durataMs: s.durataMs ?? this.suoniPronti.get(s.id) ?? null,
-        tastoRapido: s.tastoRapido,
-        pronto: this.suoniPronti.has(s.id),
-      })),
+      altoparlanti: this.progetto.altoparlanti.map((x) => {
+        const o = this.osservati.get(x.id)
+        return {
+          id: x.id, nome: x.nome, zonaId: x.zonaId, collegato: o?.collegato ?? false,
+          volume: x.volume, muto: x.muto, latenzaMs: x.latenzaMs,
+          indirizzo: o?.indirizzo ?? null, vistoIl: x.vistoIl,
+          inIdentificazione: this.identificazioni.has(x.id),
+        }
+      }),
+      telecamere: this.progetto.telecamere.map((t) => {
+        const v = this.telecamere.viva(t.id)
+        return {
+          id: t.id, nome: t.nome, zonaId: t.zonaId, host: t.host, porta: t.porta,
+          raggiungibile: v?.raggiungibile ?? false,
+          batteria: v?.batteria ?? null,
+          segnale: v?.segnale ?? null,
+          inRegistrazione: reg.telecamere.includes(t.id),
+          fpsAnteprima: v?.fpsAnteprima ?? null,
+          vistoIl: v?.vistoIl ?? null,
+          https: t.https,
+          utente: t.utente,
+          conPassword: t.passwordCifrata !== null,
+          dettagli: v?.dettagli ?? null,
+          inIdentificazione: v?.inIdentificazione ?? false,
+        }
+      }),
+      suoni: [...this.progetto.suoni]
+        .sort((x, y) => x.ordine - y.ordine)
+        .map((s) => ({
+          id: s.id, nome: s.nome, colore: s.colore, categoria: s.categoria,
+          durataMs: s.durataMs ?? this.suoniPronti.get(s.id) ?? null,
+          tastoRapido: s.tastoRapido,
+          pronto: this.suoniPronti.has(s.id),
+          guadagno: s.guadagno,
+        })),
       registrazione: {
-        attive: 0, spazioLiberoGb: 0, sottoAvviso: false, bloccata: false,
+        attive: reg.telecamere.length,
+        spazioLiberoGb: Math.round(reg.spazioLiberoGb * 10) / 10,
+        sottoAvviso: reg.spazioLiberoGb < this.progetto.registrazione.avvisoSpazioGb,
+        bloccata: reg.spazioLiberoGb < this.progetto.registrazione.bloccoSpazioGb,
         cartella: this.progetto.registrazione.cartella,
       },
       audio: {
@@ -142,6 +263,13 @@ export class MotoreRegia implements Motore {
             ((a.frequenza * a.canali * 2 * 8 * this.progetto.altoparlanti.length) / 1e6) * 10,
           ) / 10,
       },
+      impostazioni: {
+        audio: this.progetto.audio,
+        server: this.progetto.server,
+        registrazione: this.progetto.registrazione,
+      },
+      ambiente: this.ambiente.ultimo(),
+      latenzaAttesaMs: latenzaAttesaMs(a),
       avvisi: [...this.avvisi],
     }
   }
@@ -164,14 +292,87 @@ export class MotoreRegia implements Motore {
 
   diario(livello: 'info' | 'attenzione' | 'grave', testo: string): void {
     const e = { tipo: 'diario', quando: new Date().toISOString(), livello, testo } as const
+    this.righeDiario.push(e)
+    if (this.righeDiario.length > RIGHE_DIARIO) this.righeDiario.shift()
     for (const a of this.ascoltatoriDiario) a(e)
+  }
+
+  /** Le Telecamere di cui almeno un'interfaccia collegata vuole i fotogrammi. */
+  interessatoVideo(telecamere: readonly string[]): void {
+    this.telecamere.vuoleAnteprima(telecamere)
+  }
+
+  /**
+   * L'ultimo fotogramma chiave, per chi si collega adesso.
+   *
+   * La Telecamera emette un IDR ogni secondo e non e configurabile: senza
+   * questa cache, ogni interfaccia che apre la griglia vede nero fino a un
+   * secondo per cella. Ogni IDR e preceduto da SPS e PPS, quindi quello che
+   * esce di qui e autonomamente decodificabile.
+   */
+  ultimoIdr(telecameraId: string): Uint8Array | null {
+    return this.telecamere.ultimoIdr(telecameraId)
+  }
+
+  elencoRegistrazioni(): Promise<FileRegistrato[]> {
+    return this.registratore.elenco()
+  }
+
+  /**
+   * Un Suono caricato dall'interfaccia come byte, non come percorso.
+   *
+   * L'interfaccia e una pagina web: in Electron con `sandbox: true` un
+   * `<input type=file>` non da il percorso vero del file, e il tablet della
+   * Fase 3 non ha nemmeno lo stesso disco. I byte funzionano da tutti e tre i
+   * posti, e passano dalla stessa strada di un'importazione da percorso --
+   * si scrive un file temporaneo e si riusa `suono.importa`.
+   */
+  async importaSuono(nome: string, dati: Buffer): Promise<void> {
+    const sicuro = path.basename(nome).replace(/[^\p{L}\p{N} ._-]+/gu, '_').slice(0, 80) || 'suono'
+    // Il file temporaneo si chiama come l'originale, e a essere unica e la
+    // **cartella**: il nome del Suono nasce dal nome del file, e un pulsante
+    // che dice "regia-import-1788957434051-catene" non lo legge nessuno al buio.
+    const cartella = await fs.mkdtemp(path.join(os.tmpdir(), 'regia-import-'))
+    const temporaneo = path.join(cartella, sicuro)
+    await fs.writeFile(temporaneo, dati)
+    try {
+      await this.esegui({ tipo: 'suono.importa', percorsi: [temporaneo] })
+    } finally {
+      await fs.rm(cartella, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  async esportaProgetto(): Promise<string> {
+    return JSON.stringify(
+      {
+        ...this.progetto,
+        telecamere: this.progetto.telecamere.map((t) => ({ ...t, passwordCifrata: null })),
+      },
+      null,
+      2,
+    )
+  }
+
+  async importaProgettoDaTesto(testo: string): Promise<void> {
+    const temporaneo = path.join(os.tmpdir(), `regia-progetto-${Date.now()}.json`)
+    await fs.writeFile(temporaneo, testo, 'utf8')
+    try {
+      await this.importa(temporaneo)
+      this.archivio.programmaSalvataggio(this.progetto)
+    } finally {
+      await fs.rm(temporaneo, { force: true }).catch(() => {})
+    }
   }
 
   // -------------------------------------------------------------- comandi
 
   async esegui(c: Comando): Promise<void> {
     switch (c.tipo) {
+      // ------------------------------------------------------------- Zone
       case 'zona.crea': {
+        if (this.progetto.zone.length >= 12) {
+          throw new Error('dodici Zone sono il massimo (§3.1)')
+        }
         const z: Zona = {
           id: this.nuovoId('z'),
           nome: c.nome,
@@ -182,7 +383,7 @@ export class MotoreRegia implements Motore {
           suoniAbilitati: null,
         }
         this.progetto.zone.push(z)
-        this.riconfiguraAudio()
+        this.riconfiguraTutto()
         this.diario('info', `Creata la Zona "${z.nome}"`)
         break
       }
@@ -190,7 +391,7 @@ export class MotoreRegia implements Motore {
         this.zona(c.zonaId).nome = c.nome
         // Il nome della Zona *e* l'identificativo del suo stream Snapcast
         // (ADR 0005): rinominarla cambia la configurazione del server.
-        this.riconfiguraAudio()
+        this.riconfiguraTutto()
         break
       case 'zona.colore':
         this.zona(c.zonaId).colore = c.colore
@@ -199,7 +400,7 @@ export class MotoreRegia implements Motore {
         const o = this.zona(c.zonaId)
         const z: Zona = { ...o, id: this.nuovoId('z'), nome: `${o.nome} (copia)`, ordine: this.progetto.zone.length }
         this.progetto.zone.push(z)
-        this.riconfiguraAudio()
+        this.riconfiguraTutto()
         break
       }
       case 'zona.elimina': {
@@ -209,14 +410,14 @@ export class MotoreRegia implements Motore {
         // normale di un telefono acceso ma non ancora messo in una stanza.
         for (const a of this.progetto.altoparlanti) if (a.zonaId === c.zonaId) a.zonaId = null
         for (const t of this.progetto.telecamere) if (t.zonaId === c.zonaId) t.zonaId = null
-        this.riconfiguraAudio()
+        this.riconfiguraTutto()
         this.diario('info', `Eliminata la Zona "${z.nome}"`)
         break
       }
       case 'zona.riordina':
         for (const [i, id] of c.ordine.entries()) this.zona(id).ordine = i
         // L'ordine decide le porte delle sorgenti: riordinare le rimescola.
-        this.riconfiguraAudio()
+        this.riconfiguraTutto()
         break
       case 'zona.sottofondo': {
         const z = this.zona(c.zonaId)
@@ -236,6 +437,7 @@ export class MotoreRegia implements Motore {
         this.zona(c.zonaId).suoniAbilitati = c.suoni
         break
 
+      // ---------------------------------------------------- riproduzione
       case 'zona.suona': {
         const s = this.suono(c.suonoId)
         if (!this.suoniPronti.has(c.suonoId)) {
@@ -253,6 +455,12 @@ export class MotoreRegia implements Motore {
         this.audio.suona(c.zone, c.suonoId, s.guadagno, c.esclusivo)
         break
       }
+      case 'zona.provaAudio': {
+        const z = this.zona(c.zonaId)
+        this.audio.suona([z.id], SUONO_PROVA, 1, false)
+        this.diario('info', `Suono di prova nella Zona "${z.nome}"`)
+        break
+      }
       case 'zona.volume': {
         this.zona(c.zonaId).volume = c.volume
         this.audio.volume(c.zonaId, c.volume)
@@ -267,6 +475,7 @@ export class MotoreRegia implements Motore {
         this.diario('attenzione', 'STOP TUTTO')
         break
 
+      // ------------------------------------------------------------ Suoni
       case 'suono.importa': {
         for (const percorso of c.percorsi) {
           const file = await this.libreria.importa(percorso)
@@ -308,58 +517,223 @@ export class MotoreRegia implements Motore {
         if (c.nome !== undefined) s.nome = c.nome
         if (c.colore !== undefined) s.colore = c.colore
         if (c.categoria !== undefined) s.categoria = c.categoria
-        if (c.guadagno !== undefined) s.guadagno = c.guadagno
         if (c.tastoRapido !== undefined) s.tastoRapido = c.tastoRapido
+        if (c.guadagno !== undefined) {
+          s.guadagno = c.guadagno
+          // Un Sottofondo gia in corso non si riavvia per un cambio di volume:
+          // si ridice al mixer con che guadagno mixarlo, e prosegue a meta.
+          for (const z of this.progetto.zone) {
+            if (z.sottofondoId === s.id) this.audio.sottofondo(z.id, s.id, s.guadagno)
+          }
+        }
         break
       }
       case 'suono.riordina':
         for (const [i, id] of c.ordine.entries()) this.suono(id).ordine = i
         break
+      case 'suono.anteprima': {
+        const s = this.suono(c.suonoId)
+        const esito = await this.libreria.assicura(s, this.progetto.audio)
+        await this.anteprima.suona(esito.percorso, this.progetto.audio)
+        break
+      }
 
+      // ---------------------------------------------------- Altoparlanti
       case 'altoparlante.assegna': {
         const a = this.altoparlante(c.clientId)
         if (c.zonaId) this.zona(c.zonaId)
         a.zonaId = c.zonaId
+        // Non si aspetta la passata periodica: chi assegna un Altoparlante sta
+        // guardando il telefono, e vuole sentirlo suonare adesso.
+        void this.server.ricollega()
         break
       }
-      case 'altoparlante.rinomina':
-        this.altoparlante(c.clientId).nome = c.nome
+      case 'altoparlante.rinomina': {
+        const a = this.altoparlante(c.clientId)
+        a.nome = c.nome
+        // Il nome si scrive anche sul server, cosi e persistente e lo si vede
+        // da Snapdroid; ma la verita resta il file di progetto (ADR 0005).
+        await this.server.rinominaClient(c.clientId, c.nome).catch(() => {})
         break
+      }
       case 'altoparlante.volume':
         this.altoparlante(c.clientId).volume = c.volume
+        void this.server.ricollega()
         break
       case 'altoparlante.muto':
         this.altoparlante(c.clientId).muto = c.muto
+        void this.server.ricollega()
         break
       case 'altoparlante.latenza':
         this.altoparlante(c.clientId).latenzaMs = c.latenzaMs
+        void this.server.ricollega()
         break
-      case 'altoparlante.dimentica':
+      case 'altoparlante.identifica':
+        await this.server.identifica(c.clientId)
+        break
+      case 'altoparlante.dimentica': {
+        const a = this.altoparlante(c.clientId)
         this.progetto.altoparlanti = this.progetto.altoparlanti.filter((x) => x.id !== c.clientId)
-        break
-
-      case 'impostazioni.audio': {
-        if (c.bufferMs !== undefined) this.progetto.audio.bufferMs = c.bufferMs
-        this.diario(
-          'attenzione',
-          `Latenza attesa dal pulsante al suono: ${latenzaAttesaMs(this.progetto.audio)} ms`,
-        )
+        await this.server.dimenticaClient(c.clientId).catch(() => {})
+        this.diario('info', `Dimenticato l'Altoparlante "${a.nome}"`)
         break
       }
 
-      // Non ancora collegati. Meglio un errore netto che un comportamento finto.
-      case 'altoparlante.identifica':
-        throw new NonAncora('Identifica')
-      case 'telecamera.aggiungi': case 'telecamera.rinomina': case 'telecamera.assegna':
-      case 'telecamera.identifica': case 'telecamera.rimuovi': case 'telecamera.controlla':
-      case 'telecamera.scansiona':
-        throw new NonAncora('le Telecamere')
-      case 'registrazione.avvia': case 'registrazione.ferma':
-        throw new NonAncora('la registrazione')
-      case 'server.avvia': case 'server.ferma': case 'server.riavvia': case 'ricollegaTutto':
-        throw new NonAncora('il server audio')
-      case 'suono.anteprima':
-        throw new NonAncora("l'anteprima dei Suoni sul PC")
+      // ------------------------------------------------------ Telecamere
+      case 'telecamera.aggiungi': {
+        const t: Telecamera = {
+          id: this.nuovoId('t'),
+          nome: `Telecamera ${this.progetto.telecamere.length + 1}`,
+          host: c.host,
+          porta: c.porta,
+          https: c.https,
+          utente: c.utente,
+          passwordCifrata: null,
+          zonaId: null,
+        }
+        if (c.password) this.impostaPassword(t, c.password)
+        this.progetto.telecamere.push(t)
+        this.telecamere.sincronizza()
+        // Il preset si applica subito: `streaming_enabled` e persistente fra i
+        // riavvii del telefono, quindi non si puo dare per acceso.
+        this.telecamere
+          .preparaTelecamera(t)
+          .catch((e: unknown) =>
+            this.diario('attenzione', `"${t.nome}" aggiunta ma non risponde: ${(e as Error).message}`),
+          )
+        this.diario('info', `Aggiunta la Telecamera ${t.host}:${t.porta}`)
+        break
+      }
+      case 'telecamera.rinomina':
+        this.telecamera(c.telecameraId).nome = c.nome
+        break
+      case 'telecamera.assegna': {
+        const t = this.telecamera(c.telecameraId)
+        if (c.zonaId) this.zona(c.zonaId)
+        t.zonaId = c.zonaId
+        break
+      }
+      case 'telecamera.identifica':
+        await this.telecamere.identifica(c.telecameraId)
+        break
+      case 'telecamera.rimuovi': {
+        const t = this.telecamera(c.telecameraId)
+        await this.registratore.spegni(c.telecameraId)
+        this.progetto.telecamere = this.progetto.telecamere.filter((x) => x.id !== c.telecameraId)
+        this.passwordInChiaro.delete(c.telecameraId)
+        this.telecamere.sincronizza()
+        this.diario('info', `Rimossa la Telecamera "${t.nome}"`)
+        break
+      }
+      case 'telecamera.controlla':
+        await this.telecamere.controlla(c.telecameraId, c.parametri)
+        break
+      case 'telecamera.scansiona': {
+        const trovate = await this.telecamere.scansiona(c.sottorete)
+        const gia = new Set(this.progetto.telecamere.map((t) => `${t.host}:${t.porta}`))
+        for (const t of trovate) {
+          if (gia.has(`${t.host}:${t.porta}`)) continue
+          const nuova: Telecamera = {
+            id: this.nuovoId('t'),
+            nome: t.nome ?? `Telecamera ${t.host.split('.').pop()}`,
+            host: t.host, porta: t.porta, https: false,
+            utente: null, passwordCifrata: null, zonaId: null,
+          }
+          this.progetto.telecamere.push(nuova)
+        }
+        this.telecamere.sincronizza()
+        break
+      }
+
+      // ---------------------------------------------------- Registrazione
+      case 'registrazione.avvia':
+        await this.registratore.accendiMolte(this.telecamereDi(c.ambito))
+        break
+      case 'registrazione.ferma':
+        await this.registratore.spegniMolte(this.telecamereDi(c.ambito))
+        break
+      case 'registrazione.apriCartella': {
+        const cartella = this.progetto.registrazione.cartella
+        await fs.mkdir(cartella, { recursive: true })
+        // `explorer.exe` risponde 1 anche quando riesce: non si guarda l'esito.
+        spawn('explorer.exe', [cartella], { windowsHide: false, detached: true }).unref()
+        break
+      }
+
+      // --------------------------------------------------- server e rete
+      case 'server.avvia':
+        await this.server.avvia()
+        break
+      case 'server.ferma':
+        await this.server.ferma()
+        break
+      case 'server.riavvia':
+        await this.server.riavvia()
+        break
+      case 'ricollegaTutto':
+        await this.server.ricollega()
+        this.telecamere.sincronizza()
+        this.diario('info', 'Ricollegamento forzato di Altoparlanti e Telecamere.')
+        break
+      case 'ambiente.controlla':
+        await this.ambiente.controlla(
+          this.progetto.server.distro,
+          generaConfigurazione(this.progetto).porte,
+        )
+        break
+
+      // -------------------------------------- progetto e impostazioni
+      case 'progetto.rinomina':
+        this.progetto.nome = c.nome
+        break
+      case 'progetto.esporta':
+        await this.esporta(c.percorso)
+        break
+      case 'progetto.importa':
+        await this.importa(c.percorso)
+        break
+
+      case 'impostazioni.audio': {
+        const a = this.progetto.audio
+        if (c.bufferMs !== undefined) a.bufferMs = c.bufferMs
+        if (c.codec !== undefined) a.codec = c.codec
+        if (c.bloccoMs !== undefined) a.bloccoMs = c.bloccoMs
+        if (c.dissolvenzaMs !== undefined) a.dissolvenzaMs = c.dissolvenzaMs
+        if (c.anticipoMs !== undefined) a.anticipoMs = c.anticipoMs
+        if (c.idleThresholdMs !== undefined) a.idleThresholdMs = c.idleThresholdMs
+        if (c.portaBaseFlussi !== undefined) a.portaBaseFlussi = c.portaBaseFlussi
+        this.riconfiguraTutto()
+        this.diario(
+          'attenzione',
+          `Latenza attesa dal pulsante al suono: ${latenzaAttesaMs(a)} ms`,
+        )
+        break
+      }
+      case 'impostazioni.server': {
+        const s = this.progetto.server
+        if (c.distro !== undefined) s.distro = c.distro
+        if (c.portaControllo !== undefined) s.portaControllo = c.portaControllo
+        if (c.portaHttp !== undefined) s.portaHttp = c.portaHttp
+        if (c.portaFlussoClient !== undefined) s.portaFlussoClient = c.portaFlussoClient
+        this.riconfiguraTutto()
+        break
+      }
+      case 'impostazioni.registrazione': {
+        const r = this.progetto.registrazione
+        if (c.cartella !== undefined) r.cartella = c.cartella
+        if (c.minutiSegmento !== undefined) r.minutiSegmento = c.minutiSegmento
+        if (c.conAudio !== undefined) r.conAudio = c.conAudio
+        if (c.avvisoSpazioGb !== undefined) r.avvisoSpazioGb = c.avvisoSpazioGb
+        if (c.bloccoSpazioGb !== undefined) r.bloccoSpazioGb = c.bloccoSpazioGb
+        break
+      }
+      case 'diario.esporta': {
+        const righe = this.righeDiario.map((r) => `${r.quando}\t${r.livello}\t${r.testo}`)
+        await fs.writeFile(c.percorso, righe.join('\r\n') + '\r\n', 'utf8')
+        this.diario('info', `Diario esportato in ${c.percorso}`)
+        break
+      }
+
       default: {
         const mai: never = c
         throw new Error(`comando sconosciuto: ${JSON.stringify(mai)}`)
@@ -373,19 +747,40 @@ export class MotoreRegia implements Motore {
   // -------------------------------------------------------------- interni
 
   /**
-   * Ridice al thread audio quali Flussi servire.
+   * Ridice al thread audio quali Flussi servire, e al server che la sua
+   * configurazione e cambiata.
    *
-   * Si chiama a ogni cambiamento che tocchi le Zone -- creazione, rinomina,
-   * riordino, eliminazione -- perche ognuno di quelli cambia anche la
-   * configurazione di snapserver (ADR 0005). Succede in Setup, dove ricostruire
-   * mixer e socket non costa nulla.
+   * Il thread audio si riconfigura subito -- ricostruire mixer e socket costa
+   * millisecondi. Il server no: riavviarlo sono due secondi di silenzio, e
+   * questo comando arriva a ogni lettera digitata nel nome di una Zona. Si
+   * aspetta che l'Operatore abbia finito di scrivere.
    */
+  private riconfiguraTutto(): void {
+    this.riconfiguraAudio()
+    // Da qui al riavvio il progetto e gia quello nuovo e il server e ancora
+    // quello vecchio: il supervisore deve saperlo, o riconcilierebbe contro
+    // stream che non esistono ancora.
+    this.server.annunciaRiconfigurazione()
+    if (this.riconfigurazione) clearTimeout(this.riconfigurazione)
+    this.riconfigurazione = setTimeout(() => {
+      this.riconfigurazione = null
+      void this.server.riconfigura().catch((e: unknown) =>
+        this.diario('attenzione', `Riconfigurazione del server fallita: ${(e as Error).message}`),
+      )
+    }, ATTESA_RICONFIGURAZIONE_MS)
+    this.riconfigurazione.unref?.()
+  }
+
   private riconfiguraAudio(): void {
     this.audio.configura(
+      this.hostFlussi,
       this.progetto.audio,
       flussiDi(this.progetto).map((f) => ({
         id: f.id,
-        zonaId: f.zonaId,
+        // Il Flusso dei non assegnati ha bisogno di un nome per essere
+        // indirizzato: Identifica ci scrive dentro, e senza un mixer vivo la
+        // `async_read` di snapserver su quella socket resta pendente.
+        zonaId: chiaveFlussoDi(f.zonaId),
         porta: f.porta,
         volume: f.zonaId ? (this.progetto.zone.find((z) => z.id === f.zonaId)?.volume ?? 1) : 1,
       })),
@@ -395,6 +790,128 @@ export class MotoreRegia implements Motore {
   /** Il thread audio conferma di avere un Suono in memoria. */
   segnaSuonoPronto(suonoId: string, durataMs: number): void {
     this.suoniPronti.set(suonoId, durataMs)
+  }
+
+  segnaSegnale(id: string, durataMs: number): void {
+    this.durateSegnali.set(id, durataMs)
+  }
+
+  /**
+   * Un telefono che il server vede e che il progetto non conosce.
+   *
+   * Entra come non assegnato, che e lo stato normale a meta Setup e non un
+   * errore: la lista si riempie da sola man mano che i telefoni si collegano
+   * (§3.8, passo 4), e l'Operatore li mette nelle Zone con Identifica.
+   */
+  private accogliAltoparlante(clientId: string, nome: string): void {
+    if (this.progetto.altoparlanti.some((a) => a.id === clientId)) return
+    this.progetto.altoparlanti.push({
+      id: clientId,
+      nome: nome.slice(0, 40) || 'Altoparlante',
+      zonaId: null,
+      volume: 1,
+      muto: false,
+      latenzaMs: 0,
+      vistoIl: new Date().toISOString(),
+    })
+    this.diario('info', `Nuovo Altoparlante: "${nome}". E non assegnato.`)
+    this.archivio.programmaSalvataggio(this.progetto)
+  }
+
+  private telecamereDi(ambito: Extract<Comando, { tipo: 'registrazione.avvia' }>['ambito']): string[] {
+    switch (ambito.su) {
+      case 'telecamera':
+        this.telecamera(ambito.telecameraId)
+        return [ambito.telecameraId]
+      case 'zona':
+        this.zona(ambito.zonaId)
+        return this.progetto.telecamere.filter((t) => t.zonaId === ambito.zonaId).map((t) => t.id)
+      case 'tutto':
+        return this.progetto.telecamere.map((t) => t.id)
+    }
+  }
+
+  // ------------------------------------------------------------ password
+
+  private impostaPassword(t: Telecamera, password: string): void {
+    this.passwordInChiaro.set(t.id, password)
+    try {
+      t.passwordCifrata = cifra(password)
+    } catch (e) {
+      // §6: cifrate con DPAPI o non salvate. Non si ripiega su base64.
+      t.passwordCifrata = null
+      this.diario('attenzione', (e as DpapiNonDisponibile).message)
+    }
+  }
+
+  private password(t: Telecamera): string | null {
+    const inMemoria = this.passwordInChiaro.get(t.id)
+    if (inMemoria !== undefined) return inMemoria
+    if (!t.passwordCifrata) return null
+    try {
+      const chiara = decifra(t.passwordCifrata)
+      this.passwordInChiaro.set(t.id, chiara)
+      return chiara
+    } catch {
+      this.diario('attenzione', `Non riesco a decifrare la password di "${t.nome}".`)
+      return null
+    }
+  }
+
+  // ------------------------------------------------------ esporta/importa
+
+  /**
+   * Esporta il progetto per riusarlo in un altro evento (§3.9).
+   *
+   * Le password non escono mai: sono cifrate con DPAPI legata a *questo* utente
+   * su *questo* PC, quindi altrove sarebbero comunque illeggibili -- e un file
+   * che le contenesse sarebbe un file da trattare con cura, che e esattamente
+   * cio che nessuno fa con un file di configurazione.
+   */
+  private async esporta(percorso: string): Promise<void> {
+    await fs.writeFile(percorso, await this.esportaProgetto(), 'utf8')
+    this.diario('info', `Progetto esportato in ${percorso}`)
+  }
+
+  private async importa(percorso: string): Promise<void> {
+    const testo = await fs.readFile(percorso, 'utf8')
+    const letto = zProgetto.safeParse(JSON.parse(testo))
+    if (!letto.success) {
+      throw new Error(
+        `il file non e un progetto di Regia: ${letto.error.issues
+          .slice(0, 3)
+          .map((i) => `${i.path.join('.')} ${i.message}`)
+          .join('; ')}`,
+      )
+    }
+    const rotture = violazioni(letto.data)
+    if (rotture.length > 0) {
+      throw new Error(`il progetto e incoerente: ${rotture[0]!.dove} — ${rotture[0]!.problema}`)
+    }
+
+    await this.registratore.chiudi()
+    this.progetto = letto.data
+    this.passwordInChiaro.clear()
+    this.suoniPronti.clear()
+    // Gli identificativi del file importato possono arrivare fin dove vogliono:
+    // il contatore riparte oltre il massimo, o il prossimo id collidera.
+    this.prossimoId = prossimoIdLibero(this.progetto)
+    this.riconfiguraTutto()
+    this.telecamere.sincronizza()
+
+    const esito = await this.libreria.assicuraTutti(this.progetto.suoni, this.progetto.audio)
+    for (const e of esito.errori) this.diario('attenzione', e.message)
+    for (const { suono, percorso: pcm, durataMs } of esito.pronti) {
+      suono.durataMs = durataMs
+      await this.audio.caricaSuono(suono.id, pcm)
+      this.suoniPronti.set(suono.id, durataMs)
+    }
+    for (const z of this.progetto.zone) {
+      if (!z.sottofondoId) continue
+      const s = this.progetto.suoni.find((x) => x.id === z.sottofondoId)
+      if (s) this.audio.sottofondo(z.id, s.id, s.guadagno)
+    }
+    this.diario('info', `Progetto "${this.progetto.nome}" importato da ${percorso}`)
   }
 
   private nuovoId(prefisso: string): string {
@@ -416,6 +933,42 @@ export class MotoreRegia implements Motore {
     if (!a) throw new Error(`Altoparlante inesistente: ${id}`)
     return a
   }
+  private telecamera(id: string): Telecamera {
+    const t = this.progetto.telecamere.find((x) => x.id === id)
+    if (!t) throw new Error(`Telecamera inesistente: ${id}`)
+    return t
+  }
+
+  async chiudi(): Promise<void> {
+    if (this.riconfigurazione) clearTimeout(this.riconfigurazione)
+    await this.anteprima.ferma()
+    await this.registratore.chiudi()
+    await this.telecamere.chiudi()
+    // Il server audio **non** si spegne: e staccato con `setsid` apposta per
+    // sopravvivere alla chiusura di Regia, e riaprendo l'app se lo ritrova gia
+    // acceso invece di ricomprarsi due secondi di silenzio.
+    await this.server.chiudi()
+  }
+}
+
+/**
+ * Il primo identificativo che nessuno usa.
+ *
+ * Gli id sono `z1`, `s7`, `t3`: un contatore solo per tutti i prefissi. Dopo
+ * un'importazione va portato oltre il massimo gia presente, o il primo Suono
+ * aggiunto prenderebbe l'identificativo di una Zona esistente.
+ */
+export function prossimoIdLibero(p: Progetto): number {
+  let massimo = 0
+  for (const id of [
+    ...p.zone.map((x) => x.id),
+    ...p.suoni.map((x) => x.id),
+    ...p.telecamere.map((x) => x.id),
+  ]) {
+    const n = /^[a-z](\d+)$/.exec(id)
+    if (n) massimo = Math.max(massimo, Number(n[1]))
+  }
+  return massimo + 1
 }
 
 export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise<MotoreAvviato> {
@@ -439,10 +992,8 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
     )
   }
 
-  const libreria = new LibreriaSuoni(
-    path.join(cartellaDati, 'suoni'),
-    path.join(cartellaDati, 'cache'),
-  )
+  const cartellaCache = path.join(cartellaDati, 'cache')
+  const libreria = new LibreriaSuoni(path.join(cartellaDati, 'suoni'), cartellaCache)
 
   // Il motore si crea prima del thread audio, e il thread audio ha bisogno di
   // parlargli: si risolve con un rimando, non con un ordine di costruzione
@@ -471,6 +1022,18 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
     }),
   )
 
+  // I due segnali che Regia si fabbrica da sola: Identifica e il test audio di
+  // Zona. Non stanno nella libreria -- non sono Suoni del dominio -- ma per il
+  // mixer sono Suoni come gli altri, e questo e cio che li rende semplici.
+  for (const s of await scriviSegnali(cartellaCache, progetto.audio)) {
+    try {
+      await audio.caricaSuono(s.id, s.percorso)
+      motore.segnaSegnale(s.id, s.durataMs)
+    } catch (e) {
+      motore.diario('attenzione', `Segnale "${s.id}" non caricato: ${(e as Error).message}`)
+    }
+  }
+
   // Il Flusso parte subito, anche se snapserver non c'e ancora: gli scrittori
   // riprovano finche non lo trovano, e il §4.3 vuole che quando c'e non ci sia
   // mai un istante di silenzio non prodotto da noi.
@@ -485,15 +1048,53 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
     audio.sottofondo(z.id, suono.id, suono.guadagno)
   }
 
-  const servitore = new Servitore(motore, { ...OPZIONI_PREDEFINITE, ...opzioni.servitore })
-  const porta = await servitore.avvia()
+  motore.telecamere.avvia()
+  motore.registratore.avvia()
+
+  // Il server audio: prima si prova ad **adottarne** uno gia acceso. Con
+  // `setsid` sopravvive alla chiusura di Regia, e riavviarlo per abitudine
+  // sarebbe due secondi di silenzio che nessuno ha chiesto.
+  // L'indirizzo della distro si cerca **prima** di qualunque altra cosa: e
+  // dove gli scrittori devono aprire le socket, e partire su `127.0.0.1` per
+  // qualche secondo significa aprirle su un inoltro di WSL che non legge.
+  void motore.server
+    .aggiornaIndirizzoDistro()
+    .catch(() => null)
+    .then(() => motore?.server.adotta())
+    .then((trovato) => {
+      if (trovato) motore?.diario('info', 'Trovato un server audio gia acceso: adottato.')
+    })
+  void motore.ambiente
+    .controlla(progetto.server.distro, generaConfigurazione(progetto).porte)
+    .catch(() => {})
+
+  const servitore = new Servitore(motore, {
+    ...OPZIONI_PREDEFINITE,
+    ...(opzioni.cartellaUi !== undefined ? { cartellaUi: opzioni.cartellaUi } : {}),
+    ...opzioni.servitore,
+  })
+
+  let porta: number
+  try {
+    porta = await servitore.avvia()
+  } catch (e) {
+    // Se la porta e occupata non si lascia in giro un thread audio che scrive
+    // su tredici socket per sempre: si smonta tutto quello che si e acceso
+    // prima di rilanciare l'errore.
+    await motore.chiudi().catch(() => {})
+    await audio.chiudi().catch(() => {})
+    await archivio.chiudi().catch(() => {})
+    throw e
+  }
   motore.diario('info', `Regia in ascolto sulla porta ${porta}`)
 
+  const vivo = motore
   return {
     porta,
     indirizzo: `http://127.0.0.1:${porta}/`,
     async ferma() {
       await servitore.ferma()
+      await vivo.chiudi()
       // Prima l'audio, poi il progetto: chiudere le socket in modo ordinato
       // richiede un attimo, e il salvataggio non ha fretta.
       await audio.chiudi()
@@ -503,4 +1104,4 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
 }
 
 /** Utile per dimensionare i buffer da fuori senza reimportare il dominio. */
-export { byteBlocco }
+export { byteBlocco, FLUSSO_NON_ASSEGNATI }

@@ -1,0 +1,960 @@
+/*
+ * Il tema e scuro e non e una preferenza: la Regia sta in una stanza buia,
+ * accanto a chi guarda sei anteprime video, e uno sfondo chiaro brucia gli
+ * occhi per mezzo minuto (§5.1). Da qui discende tutto il resto -- i contrasti
+ * alti, il testo grande, i pulsanti larghi abbastanza per un dito su un
+ * touchscreen e per una mano che non guarda.
+ *
+ * Il colore non decora: dice. Rosso = si sta perdendo qualcosa. Ambra =
+ * guardaci. Il colore di una Zona e quello scelto dall'Operatore, e non deve
+ * mai essere confuso con quei due.
+ */
+
+:root {
+  --fondo: #0b0b0d;
+  --fondo-alto: #141419;
+  --fondo-scheda: #1a1a21;
+  --fondo-scheda-alto: #24242e;
+  --bordo: #2e2e3a;
+  --bordo-vivo: #45455a;
+
+  --testo: #e8e8ef;
+  --testo-quieto: #9a9aac;
+  --testo-fioco: #6a6a7c;
+
+  --grave: #ff4d4d;
+  --grave-fondo: #3a1414;
+  --attenzione: #ffb02e;
+  --attenzione-fondo: #3a2c10;
+  --bene: #4ade80;
+  --accento: #ff6b35;
+
+  --raggio: 10px;
+  --raggio-piccolo: 6px;
+  --ombra: 0 2px 12px rgb(0 0 0 / 55%);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * `hidden` deve vincere sempre. Senza questo, un elemento a cui il CSS da
+ * `display: flex` o `display: grid` resta visibile anche con `el.hidden = true`,
+ * perche la regola dell'attributo ha specificita piu bassa. E il tipo di bug
+ * che non da errore: si vede e basta, e solo se si guarda.
+ */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--fondo);
+  color: var(--testo);
+  font: 15px/1.45 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.caricamento {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--testo-quieto);
+}
+
+/* --------------------------------------------------------------- impianto */
+
+#regia.app {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    'nav schermo'
+    'nav barra';
+  height: 100%;
+}
+
+nav.navigazione {
+  grid-area: nav;
+  background: var(--fondo-alto);
+  border-right: 1px solid var(--bordo);
+  display: flex;
+  flex-direction: column;
+  padding: 12px 8px;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+nav .marchio {
+  font-size: 13px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accento);
+  padding: 6px 12px 14px;
+  font-weight: 600;
+}
+
+nav .marchio small {
+  display: block;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--testo-fioco);
+  font-weight: 400;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+nav button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-radius: var(--raggio-piccolo);
+  color: var(--testo-quieto);
+  cursor: pointer;
+  font: inherit;
+  padding: 10px 12px;
+  text-align: left;
+  transition: background 90ms linear, color 90ms linear;
+}
+
+nav button:hover {
+  background: var(--fondo-scheda);
+  color: var(--testo);
+}
+
+nav button[aria-current='true'] {
+  background: var(--fondo-scheda-alto);
+  color: var(--testo);
+  box-shadow: inset 3px 0 0 var(--accento);
+}
+
+nav .riempi {
+  flex: 1;
+}
+
+/* Lo STOP TUTTO sta nella navigazione, sempre visibile, in ogni schermata. */
+nav .stop-tutto {
+  background: var(--grave-fondo);
+  border: 1px solid var(--grave);
+  color: #ffd9d9;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 14px 12px;
+  text-align: center;
+  margin-top: 8px;
+}
+
+nav .stop-tutto:hover {
+  background: var(--grave);
+  color: #fff;
+}
+
+main.schermo {
+  grid-area: schermo;
+  overflow: auto;
+  padding: 18px 20px 22px;
+}
+
+main.schermo > section {
+  display: none;
+}
+
+main.schermo > section.attiva {
+  display: block;
+}
+
+/* -------------------------------------------------------------- barra di stato */
+
+.barra {
+  grid-area: barra;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid var(--bordo);
+  background: var(--fondo-alto);
+  padding: 8px 16px;
+  font-size: 13px;
+  min-height: 40px;
+}
+
+.barra .pastiglia {
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pastiglia.info {
+  background: #1e2a1e;
+  color: var(--bene);
+}
+.pastiglia.attenzione {
+  background: var(--attenzione-fondo);
+  color: var(--attenzione);
+}
+.pastiglia.grave {
+  background: var(--grave-fondo);
+  color: var(--grave);
+}
+.pastiglia.spento {
+  background: var(--fondo-scheda-alto);
+  color: var(--testo-fioco);
+}
+
+.barra .messaggio {
+  flex: 1;
+  color: var(--testo-quieto);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barra .misura {
+  color: var(--testo-fioco);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.barra.staccata {
+  background: var(--grave-fondo);
+}
+
+/* --------------------------------------------------------------- titoli */
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 4px;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 22px 0 10px;
+  color: var(--testo-quieto);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.sottotitolo {
+  color: var(--testo-fioco);
+  margin: 0 0 18px;
+  max-width: 78ch;
+}
+
+.intestazione {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+/* --------------------------------------------------------------- comandi */
+
+.pulsante {
+  appearance: none;
+  background: var(--fondo-scheda-alto);
+  border: 1px solid var(--bordo-vivo);
+  border-radius: var(--raggio-piccolo);
+  color: var(--testo);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 14px;
+  transition: background 90ms linear, border-color 90ms linear;
+  white-space: nowrap;
+}
+
+.pulsante:hover:not(:disabled) {
+  background: #30303d;
+  border-color: #5a5a72;
+}
+
+.pulsante:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.pulsante.principale {
+  background: var(--accento);
+  border-color: var(--accento);
+  color: #1a0d06;
+  font-weight: 600;
+}
+
+.pulsante.principale:hover:not(:disabled) {
+  background: #ff8455;
+  border-color: #ff8455;
+}
+
+.pulsante.pericolo {
+  border-color: #5e2a2a;
+  color: #ffb8b8;
+}
+
+.pulsante.pericolo:hover:not(:disabled) {
+  background: var(--grave-fondo);
+  border-color: var(--grave);
+}
+
+.pulsante.armato {
+  background: var(--grave);
+  border-color: var(--grave);
+  color: #fff;
+  font-weight: 700;
+}
+
+.pulsante.piccolo {
+  padding: 5px 9px;
+  font-size: 13px;
+}
+
+.fila {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+input[type='text'],
+input[type='number'],
+input[type='password'],
+select {
+  background: var(--fondo);
+  border: 1px solid var(--bordo-vivo);
+  border-radius: var(--raggio-piccolo);
+  color: var(--testo);
+  font: inherit;
+  padding: 7px 9px;
+  min-width: 0;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accento);
+  outline-offset: 1px;
+}
+
+input[type='color'] {
+  background: transparent;
+  border: 1px solid var(--bordo-vivo);
+  border-radius: var(--raggio-piccolo);
+  height: 34px;
+  width: 44px;
+  padding: 2px;
+  cursor: pointer;
+}
+
+label.campo {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--testo-quieto);
+}
+
+label.interruttore {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--testo-quieto);
+}
+
+/* Il cursore del volume: largo, perche si usa al buio e in fretta. */
+input[type='range'] {
+  appearance: none;
+  background: transparent;
+  height: 26px;
+  cursor: pointer;
+  width: 100%;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  background: var(--fondo);
+  border: 1px solid var(--bordo-vivo);
+  border-radius: 999px;
+  height: 8px;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  background: var(--testo);
+  border-radius: 50%;
+  height: 20px;
+  width: 20px;
+  margin-top: -7px;
+  border: 2px solid var(--fondo);
+}
+
+/* ---------------------------------------------------------------- tabelle */
+
+table.elenco {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+
+table.elenco th {
+  color: var(--testo-fioco);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-align: left;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--bordo);
+}
+
+table.elenco td {
+  border-bottom: 1px solid var(--bordo);
+  padding: 8px 10px;
+  vertical-align: middle;
+}
+
+table.elenco tr.assente td {
+  color: var(--testo-fioco);
+}
+
+table.elenco td.comandi {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.vuoto {
+  border: 1px dashed var(--bordo-vivo);
+  border-radius: var(--raggio);
+  color: var(--testo-fioco);
+  padding: 26px;
+  text-align: center;
+}
+
+/* -------------------------------------------------------- luce di stato */
+
+.luce {
+  border-radius: 50%;
+  display: inline-block;
+  height: 9px;
+  width: 9px;
+  margin-right: 7px;
+  vertical-align: baseline;
+  background: var(--testo-fioco);
+}
+
+.luce.viva {
+  background: var(--bene);
+  box-shadow: 0 0 6px rgb(74 222 128 / 60%);
+}
+
+.luce.persa {
+  background: var(--grave);
+  box-shadow: 0 0 6px rgb(255 77 77 / 60%);
+}
+
+/* ----------------------------------------------------------- Produzione */
+
+.produzione {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  gap: 14px;
+}
+
+/*
+ * Le anteprime non si prendono tutto lo schermo.
+ *
+ * Con una sola Telecamera, un rapporto 16:9 su un monitor largo alto mezza
+ * pagina lascia i riquadri delle Zone sotto la piega -- e i riquadri delle Zone
+ * sono la ragione per cui questa schermata esiste. La griglia ha quindi
+ * un'altezza fissa in cui le celle si dividono lo spazio, come un impianto di
+ * sorveglianza: e il fotogramma ad adattarsi alla cella, non il contrario.
+ */
+.produzione .video-griglia {
+  height: 40vh;
+  grid-auto-rows: 1fr;
+}
+
+.zone-griglia {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+.zona {
+  background: var(--fondo-scheda);
+  border: 1px solid var(--bordo);
+  border-radius: var(--raggio);
+  border-top: 3px solid var(--colore-zona, var(--bordo-vivo));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px 12px;
+}
+
+/* Una Zona da cui non esce audio: il bordo lo dice prima di qualunque testo. */
+.zona.muta {
+  border-color: var(--grave);
+  background: linear-gradient(var(--grave-fondo), var(--fondo-scheda) 60px);
+}
+
+.zona.selezionata {
+  border-color: var(--accento);
+  box-shadow: 0 0 0 1px var(--accento);
+}
+
+.zona header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.zona header .nome {
+  font-size: 16px;
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zona header .conteggi {
+  color: var(--testo-fioco);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.zona .sottofondo {
+  color: var(--testo-quieto);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zona .sottofondo.assente {
+  color: var(--testo-fioco);
+}
+
+.zona .effetti {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 6px;
+}
+
+/*
+ * Il pulsante di un Effetto. Grande: si preme al buio, di fretta, guardando
+ * un'altra cosa. Il colore e quello del Suono, cosi la mano impara la posizione
+ * e il colore invece del nome.
+ */
+.effetto {
+  appearance: none;
+  background: var(--colore-suono, #333);
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: var(--raggio-piccolo);
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  min-height: 46px;
+  overflow: hidden;
+  padding: 6px 8px;
+  position: relative;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 60%);
+  transition: transform 60ms ease-out, filter 60ms linear;
+}
+
+.effetto:hover:not(:disabled) {
+  filter: brightness(1.25);
+}
+
+.effetto:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.effetto:disabled {
+  cursor: not-allowed;
+  filter: grayscale(0.7) brightness(0.5);
+}
+
+/* §5.2: il pulsante si illumina per la durata del suono. */
+.effetto.acceso {
+  animation: pulsa 900ms ease-in-out infinite;
+  box-shadow: 0 0 0 2px #fff, 0 0 16px 2px var(--colore-suono, #fff);
+}
+
+@keyframes pulsa {
+  0%,
+  100% {
+    filter: brightness(1.35);
+  }
+  50% {
+    filter: brightness(1.7);
+  }
+}
+
+.effetto .tasto {
+  position: absolute;
+  top: 3px;
+  right: 5px;
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+
+.zona .comandi-zona {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.zona .comandi-zona input[type='range'] {
+  flex: 1;
+}
+
+.zona .stop {
+  background: transparent;
+  border: 1px solid #5e2a2a;
+  border-radius: var(--raggio-piccolo);
+  color: #ffb8b8;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  padding: 5px 12px;
+}
+
+.zona .stop:hover {
+  background: var(--grave-fondo);
+}
+
+/* La striscia di selezione delle Zone, per i tasti rapidi e il botto finale. */
+.striscia {
+  align-items: center;
+  background: var(--fondo-scheda);
+  border: 1px solid var(--bordo);
+  border-radius: var(--raggio);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+}
+
+.striscia .etichetta {
+  color: var(--testo-fioco);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.gettone {
+  appearance: none;
+  background: var(--fondo);
+  border: 1px solid var(--bordo-vivo);
+  border-radius: 999px;
+  color: var(--testo-quieto);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 12px;
+}
+
+.gettone[aria-pressed='true'] {
+  background: var(--accento);
+  border-color: var(--accento);
+  color: #1a0d06;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------ griglia video */
+
+.video-griglia {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.cella {
+  background: #000;
+  min-height: 0;
+  border: 1px solid var(--bordo);
+  border-radius: var(--raggio-piccolo);
+  overflow: hidden;
+  position: relative;
+  cursor: zoom-in;
+}
+
+.cella canvas {
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+.cella .etichetta {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(transparent, rgb(0 0 0 / 78%));
+  color: #fff;
+  font-size: 12px;
+  padding: 16px 8px 6px;
+  pointer-events: none;
+}
+
+.cella .etichetta .zona-nome {
+  font-weight: 600;
+  border-left: 3px solid var(--colore-zona, #888);
+  padding-left: 6px;
+}
+
+.cella .etichetta .spia {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: #cfcfd8;
+}
+
+/* Spento e un pulsante discreto; acceso e la pastiglia rossa che lampeggia,
+   che si deve leggere di sfuggita da tre metri e in una stanza al buio. */
+.cella .rec {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(20, 20, 26, 0.72);
+  border: 1px solid #4a4a58;
+  border-radius: 3px;
+  color: #b9b9c6;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+}
+
+.cella .rec:hover {
+  border-color: var(--grave);
+  color: #fff;
+}
+
+.cella .rec.accesa {
+  background: var(--grave);
+  border-color: var(--grave);
+  color: #fff;
+  animation: lampeggia 1.1s steps(1, end) infinite;
+}
+
+.cella .rec.armato {
+  animation: none;
+  background: var(--attenzione);
+  border-color: var(--attenzione);
+  color: #1a1a20;
+  letter-spacing: 0;
+}
+
+@keyframes lampeggia {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.15;
+  }
+}
+
+.cella .assente {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--testo-fioco);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px;
+}
+
+.cella.ingrandita {
+  position: fixed;
+  inset: 12px;
+  z-index: 50;
+  aspect-ratio: auto;
+  cursor: zoom-out;
+  box-shadow: 0 0 0 100vmax rgb(0 0 0 / 80%);
+}
+
+/* ------------------------------------------------------------------ misto */
+
+.scheda {
+  background: var(--fondo-scheda);
+  border: 1px solid var(--bordo);
+  border-radius: var(--raggio);
+  padding: 14px 16px;
+  margin-bottom: 12px;
+}
+
+.scheda h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+}
+
+.griglia-campi {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.nota {
+  color: var(--testo-fioco);
+  font-size: 12px;
+  margin-top: 6px;
+  max-width: 80ch;
+}
+
+.avviso {
+  border-radius: var(--raggio-piccolo);
+  border-left: 3px solid var(--attenzione);
+  background: var(--attenzione-fondo);
+  color: #ffe0b0;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.avviso.grave {
+  border-left-color: var(--grave);
+  background: var(--grave-fondo);
+  color: #ffd0d0;
+}
+
+.avviso.info {
+  border-left-color: var(--bordo-vivo);
+  background: var(--fondo-scheda);
+  color: var(--testo-quieto);
+}
+
+.pastiglia-colore {
+  border-radius: 3px;
+  display: inline-block;
+  height: 12px;
+  width: 12px;
+  vertical-align: -1px;
+  margin-right: 6px;
+}
+
+/* Il diario: le ultime righe, sempre visibili nella schermata giusta. */
+.diario {
+  background: #08080a;
+  border: 1px solid var(--bordo);
+  border-radius: var(--raggio-piccolo);
+  font-family: 'Cascadia Mono', 'Consolas', monospace;
+  font-size: 12px;
+  height: 260px;
+  overflow-y: auto;
+  padding: 8px 10px;
+}
+
+.diario div {
+  padding: 1px 0;
+  color: var(--testo-quieto);
+  white-space: pre-wrap;
+}
+
+.diario div.attenzione {
+  color: var(--attenzione);
+}
+.diario div.grave {
+  color: var(--grave);
+}
+.diario time {
+  color: var(--testo-fioco);
+  margin-right: 8px;
+}
+
+/* Il passo del Setup guidato. */
+.passo {
+  border-left: 2px solid var(--bordo-vivo);
+  margin-left: 10px;
+  padding: 0 0 18px 18px;
+  position: relative;
+}
+
+.passo::before {
+  background: var(--fondo-scheda-alto);
+  border: 2px solid var(--bordo-vivo);
+  border-radius: 50%;
+  content: '';
+  height: 14px;
+  left: -8px;
+  position: absolute;
+  top: 3px;
+  width: 14px;
+}
+
+.passo.fatto::before {
+  background: var(--bene);
+  border-color: var(--bene);
+}
+
+.passo.rotto::before {
+  background: var(--grave);
+  border-color: var(--grave);
+}
+
+.passo h3 {
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+/* Il messaggio d'errore di un comando rifiutato: passa, non blocca (§5.2). */
+.brindisi {
+  position: fixed;
+  right: 18px;
+  bottom: 56px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.brindisi > div {
+  background: var(--grave-fondo);
+  border: 1px solid var(--grave);
+  border-radius: var(--raggio-piccolo);
+  box-shadow: var(--ombra);
+  color: #ffd8d8;
+  max-width: 460px;
+  padding: 9px 13px;
+  font-size: 13px;
+  animation: entra 160ms ease-out;
+}
+
+.brindisi > div.bene {
+  background: #14261a;
+  border-color: #2f6b41;
+  color: #cdf3d8;
+}
+
+@keyframes entra {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}

@@ -13,7 +13,6 @@ import type { ComandoAudio, EventoAudio, FlussoDaServire, StatoFlusso } from './
 
 export interface OpzioniMotoreAudio {
   readonly suDiario: (livello: 'info' | 'attenzione' | 'grave', testo: string) => void
-  readonly host?: string
 }
 
 /**
@@ -93,8 +92,13 @@ export class MotoreAudio {
 
   // ------------------------------------------------------------- comandi
 
-  configura(audio: ImpostazioniAudio, flussi: readonly FlussoDaServire[]): void {
-    this.manda({ tipo: 'configura', audio, flussi, host: this.opzioni.host ?? '127.0.0.1' })
+  /**
+   * @param host Dove aprire le socket delle sorgenti. **Non** `127.0.0.1`
+   *   quando snapserver sta in WSL: gli inoltri su loopback sopravvivono al
+   *   processo che ascoltava e accettano byte che nessuno leggera mai.
+   */
+  configura(host: string, audio: ImpostazioniAudio, flussi: readonly FlussoDaServire[]): void {
+    this.manda({ tipo: 'configura', audio, flussi, host })
   }
   avvia(): void {
     this.manda({ tipo: 'avvia' })
