@@ -1,0 +1,64 @@
+# Come Regia diventa un .exe.
+#
+# ⚠️ **Questo non è un eseguibile autosufficiente, e non può esserlo.** Contiene
+# tutto ciò che è nostro -- guscio, motore, interfaccia, ffmpeg -- ma il server
+# audio gira dentro WSL2 (ADR 0002: `BUILD_SERVER` è definito solo `if(NOT
+# WIN32)`), e WSL2 vuole Virtual Machine Platform, la virtualizzazione da BIOS e
+# un riavvio. Un installer li può verificare e chiedere; non li può contenere.
+# La distro con snapserver dentro, prevista dall'ADR 0003, non c'è ancora qui.
+
+appId: it.regia.app
+productName: Regia
+copyright: Regia
+
+directories:
+  output: out
+
+# Si spedisce **solo** `dist/shell`, e non è una svista. Il guscio è `main` e
+# importa `../engine/index.js`, cioè `dist/shell/engine`: `tsc -p
+# tsconfig.shell.json` compila una seconda copia del motore lì dentro. La copia
+# in `dist/engine` serve all'avvio headless (`npx tsx`, il tablet, gli script del
+# banco) e dentro l'app sarebbe peso morto identico.
+files:
+  - dist/shell/**/*
+  - dist/ui/**/*
+  - package.json
+
+# ffmpeg sta **fuori** dall'archivio, accanto all'eseguibile: `radiciCandidate()`
+# in `media/ffmpeg.ts` cerca `<resources>/vendor/ffmpeg/`, e un binario dentro
+# un asar non si può eseguire comunque.
+#
+# La build è **LGPL**, non GPL (§267 del documento di progetto chiede di
+# rispettare gli obblighi, e quelli della LGPL sono i più leggeri): la licenza
+# viaggia accanto al binario, non separata da lui.
+extraResources:
+  - from: vendor/ffmpeg
+    to: vendor/ffmpeg
+
+# `asar: true` è misurato, non un default lasciato lì. Il sospetto era il
+# thread audio: nasce da `new Worker(PERCORSO_LAVORATORE)`, che dentro
+# l'archivio diventa un `file:///...app.asar/...`, ed è il classico percorso che
+# `worker_threads` non aprirebbe -- l'app partirebbe, la finestra si vedrebbe, e
+# il Flusso non uscirebbe mai. **Non succede**: `lavoratore.js` sta dentro
+# `app.asar`, non c'è nessuna copia in `app.asar.unpacked`, e i tre scrittori
+# risultano `attivo`. Electron rattoppa `fs` anche per i worker.
+asar: true
+
+win:
+  target:
+    # Portabile: un file solo, si copia su una chiavetta e si lancia. È questo
+    # che si intende quando si chiede "l'eseguibile".
+    - portable
+    # E l'installer vero, per il PC della casa che resta montato tutta la stagione.
+    - nsis
+  # Regia sta in una stanza buia e la si lancia col mouse: niente console.
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+portable:
+  artifactName: ${productName}-${version}-portabile.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Regia

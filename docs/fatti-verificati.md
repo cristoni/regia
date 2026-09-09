@@ -503,3 +503,34 @@ un Sottofondo in una Zona. Sintomo osservato dall'Operatore: «i ms persi salgon
   che l'ADR 0010 vieta, e il commento a `suIndirizzoDistro` in `supervisore.ts` lo dice a due
   schermate di distanza. Regge solo perche `collegaEVerifica()` pretende una risposta vera a
   `Server.GetStatus` prima di dichiararsi acceso.
+
+---
+
+## Il primo pacchetto, misurato il 9 settembre 2026
+
+`electron-builder` 26.15.3, Electron 33.4.11, `npm run dist:win`. Due file in `out/`: un
+portabile e un installer NSIS, **111 MB** l'uno.
+
+- **[misurato]** ⚠️ **L'`asar` NON rompe il thread audio**, ed era il sospetto principale.
+  `PERCORSO_LAVORATORE` si ricava sostituendo dentro `import.meta.url`, quindi impacchettato
+  diventa `file:///...\resources\app.asar\dist\shell\engine\audio\lavoratore.js`. Verificato che
+  `lavoratore.js` sta **dentro** `app.asar` (`npx asar list`), che `app.asar.unpacked` **non
+  esiste**, e che i tre scrittori risultano comunque `attivo`: Electron rattoppa `fs` anche per
+  i worker. Niente `asarUnpack`, niente `asar: false`.
+- **[misurato]** **ffmpeg in bundle viene davvero preferito al PATH.** L'app impacchettata
+  riporta `N-126482-g903325e279-20260909` (la build LGPL messa in `vendor/ffmpeg`), mentre
+  l'`ffmpeg` del PATH di questa macchina è `7.1.1-essentials_build-www.gyan.dev`. Le due
+  stringhe diverse sono la prova che `radiciCandidate()` trova
+  `<resources>/vendor/ffmpeg/ffmpeg.exe` prima di arrivare al ripiego -- cioè che lo shim
+  Chocolatey e il suo ffmpeg orfano non entrano nel pacchetto.
+- **[misurato]** Il portabile avviato da `out/` arriva a `clienti: 1`, `wsl: ok`,
+  `snapserver: 0.35.0`, e tutti e tre gli scrittori `attivo` contro lo snapserver vero nella
+  distro. Il percorso guscio → motore compilato → interfaccia compilata → thread audio → distro
+  regge impacchettato.
+- **[sorgente]** ⚠️ **Non è un eseguibile autosufficiente, e non può diventarlo.** Il pacchetto
+  contiene tutto ciò che è nostro, ma non WSL2: serve Virtual Machine Platform, la
+  virtualizzazione da BIOS e un riavvio (già scritto come conseguenza nell'ADR 0003). E non
+  contiene ancora nemmeno la distro con snapserver dentro che quell'ADR prevede: `distro.ts`
+  enumera le distro già installate e si aspetta che una venga scelta in Impostazioni, con
+  `/opt/snapserver-0.35` scritto nel codice. Su un PC senza quella preparazione il pacchetto
+  parte, mostra la finestra, e il server audio resta `spento`.

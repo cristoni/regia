@@ -6,3 +6,6 @@ vendor/snapclient/
 .cache-*
 *.log
 scratch/
+
+# ffmpeg in bundle: 133 MB, si riprende con "npm run ffmpeg:prendi"
+vendor/ffmpeg/

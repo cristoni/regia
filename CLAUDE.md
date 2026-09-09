@@ -20,6 +20,9 @@ npm run typecheck             # engine, shell, interfaccia, test dell'interfacci
 npm run build                 # interfaccia + motore + guscio
 npm run dev                   # compila l'interfaccia e avvia Regia senza finestra, su :7333
 
+npm run ffmpeg:prendi         # 133 MB in vendor/ffmpeg, non versionati. Da fare una volta
+npm run dist:win              # build + electron-builder -> out/ (portabile + installer NSIS)
+
 # un solo file di test
 node --import tsx --test src/engine/audio/mixer.test.ts
 # un solo test, per nome
@@ -28,6 +31,13 @@ node --import tsx --test --test-name-pattern="sei ore" src/engine/audio/cadenza.
 
 I test girano con il loader `tsx`, non con lo strip-types di Node: gli import interni usano
 l'estensione `.js` (convenzione NodeNext) anche se i file sono `.ts`.
+
+**Il pacchetto non e autosufficiente, e non puo diventarlo.** `out/Regia-...-portabile.exe`
+contiene guscio, motore, interfaccia e ffmpeg, ma non WSL2 -- che vuole Virtual Machine
+Platform, la virtualizzazione da BIOS e un riavvio (ADR 0003) -- e non contiene ancora la
+distro con snapserver dentro: `distro.ts` si aspetta che una distro gia installata venga
+scelta in Impostazioni. Su un PC non preparato il pacchetto parte e il server audio resta
+`spento`. Le scelte di impacchettamento stanno commentate in `electron-builder.yml`.
 
 **Regia si avvia anche senza Electron**: `npx tsx src/engine/avvia.ts --porta 7333 [--rete]`
 serve l'interfaccia vera su HTTP, ed è il modo più rapido per pilotarla da script e guardarla

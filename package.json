@@ -22,7 +22,9 @@
     "banco:carico": "tsx banco/carico-dal-vero.ts",
     "build": "npm run build:ui && npm run build:engine && npm run build:shell",
     "start": "npm run build:ui && electron .",
-    "dev": "npm run build:ui && tsx src/engine/avvia.ts"
+    "dev": "npm run build:ui && tsx src/engine/avvia.ts",
+    "ffmpeg:prendi": "tsx strumenti/prendi-ffmpeg.ts",
+    "dist:win": "npm run build && electron-builder --win"
   },
   "dependencies": {
     "ws": "^8.18.0",
@@ -32,6 +34,7 @@
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
     "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
