@@ -48,6 +48,7 @@ import {
 import { GestoreTelecamere } from './telecamere/gestore.js'
 import { Registratore, type FileRegistrato } from './registrazione/registratore.js'
 import { Ambiente } from './ambiente.js'
+import { vigilaAnello } from './anello.js'
 import { DpapiNonDisponibile, cifra, decifra } from './sicurezza/dpapi.js'
 import { OPZIONI_PREDEFINITE, Servitore, type Motore, type OpzioniServitore } from './api/servitore.js'
 import type { Comando, Evento, Stato, ZonaViva } from './api/protocollo.js'
@@ -1088,11 +1089,17 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
   }
   motore.diario('info', `Regia in ascolto sulla porta ${porta}`)
 
+  // Da qui in avanti il thread principale ha del lavoro vero da fare, e il
+  // ponte di rete dipende da lui: se si ferma, si vuole leggerlo nel Diario
+  // invece di dedurlo dai telefoni che si ricollegano.
+  const smettiVigilanza = vigilaAnello((l, t) => motore?.diario(l, t))
+
   const vivo = motore
   return {
     porta,
     indirizzo: `http://127.0.0.1:${porta}/`,
     async ferma() {
+      smettiVigilanza()
       await servitore.ferma()
       await vivo.chiudi()
       // Prima l'audio, poi il progetto: chiudere le socket in modo ordinato

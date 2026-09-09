@@ -52,6 +52,8 @@ export class Ponte {
   private readonly esiti = new Map<number, PortaPonte>()
   /** Tutte le connessioni in piedi, per poterle chiudere davvero. */
   private readonly aperte = new Set<Socket>()
+  /** Stiamo smontando il ponte: le chiusure che ne seguono le abbiamo volute noi. */
+  private smontando = false
   private destinazione = ''
 
   constructor(private readonly suDiario: (livello: 'info' | 'attenzione', testo: string) => void) {}
@@ -79,6 +81,7 @@ export class Ponte {
       )
       return
     }
+    this.smontando = false
     this.destinazione = destinazione
     for (const porta of porte) this.esiti.set(porta, await this.apriUna(porta))
 
@@ -93,6 +96,7 @@ export class Ponte {
   }
 
   async chiudi(): Promise<void> {
+    this.smontando = true
     for (const s of this.aperte) s.destroy()
     this.aperte.clear()
     const servitori = [...this.servitori.values()]
@@ -141,7 +145,50 @@ export class Ponte {
     dentro.setNoDelay(true)
     fuori.setNoDelay(true)
 
-    const chiudi = () => {
+    // Chi ha chiuso per primo, e da quanto non passavano byte.
+    //
+    // Non e strumentazione di lusso: un telefono che si ricollega ogni pochi
+    // secondi lo si vede da fuori come "si scollega", e le due spiegazioni
+    // possibili chiedono rimedi opposti. Se il telefono manda FIN **mentre**
+    // il server gli stava mandando audio, ha rinunciato lui (Wi-Fi suo, o la
+    // sua CPU); se invece l'ultimo byte in discesa e vecchio di secondi, e
+    // questo ponte che e rimasto fermo -- e sta sul thread principale, insieme
+    // al video e alle istantanee. Senza questa riga si tira a indovinare.
+    const nato = performance.now()
+    // `null` fino al primo byte, e non `nato`: una connessione morta a tre
+    // secondi senza aver ricevuto niente direbbe "ultimo byte giu tre secondi
+    // fa", cioe esattamente cio che direbbe un ponte fermo per tre secondi in
+    // mezzo al flusso. Sono i due casi che questa misura deve distinguere.
+    let ultimoGiu: number | null = null // ultimo byte server -> telefono
+    let ultimoSu: number | null = null // ultimo byte telefono -> server
+    let causa: string | null = null
+    const primo = (c: string) => {
+      causa ??= c
+    }
+
+    dentro.on('data', () => {
+      ultimoSu = performance.now()
+    })
+    fuori.on('data', () => {
+      ultimoGiu = performance.now()
+    })
+    dentro.on('end', () => primo('chiusa dal telefono'))
+    fuori.on('end', () => primo('chiusa dal server audio'))
+
+    let riferito = false
+    const chiudi = (e?: Error) => {
+      if (e) primo(`errore: ${e.message}`)
+      if (!riferito && !this.smontando) {
+        riferito = true
+        const ora = performance.now()
+        this.riferisci(porta, causa ?? 'chiusa senza dirlo', {
+          durataMs: ora - nato,
+          fermoGiuMs: ultimoGiu === null ? null : ora - ultimoGiu,
+          fermoSuMs: ultimoSu === null ? null : ora - ultimoSu,
+          giuByte: dentro.bytesWritten,
+          suByte: fuori.bytesWritten,
+        })
+      }
       this.aperte.delete(dentro)
       this.aperte.delete(fuori)
       dentro.destroy()
@@ -149,10 +196,39 @@ export class Ponte {
     }
     dentro.on('error', chiudi)
     fuori.on('error', chiudi)
-    dentro.on('close', chiudi)
-    fuori.on('close', chiudi)
+    dentro.on('close', () => chiudi())
+    fuori.on('close', () => chiudi())
 
     dentro.pipe(fuori)
     fuori.pipe(dentro)
+  }
+
+  /**
+   * Una riga per connessione chiusa, e un avviso se e durata poco.
+   *
+   * Poco vuol dire meno di mezzo minuto: le connessioni di Snapdroid che
+   * durano una vita sono la normalita, e una che muore in tre secondi mentre
+   * scendevano centinaia di kilobyte e' il sintomo che si sta cercando.
+   */
+  private riferisci(
+    porta: number,
+    causa: string,
+    m: {
+      durataMs: number
+      fermoGiuMs: number | null
+      fermoSuMs: number | null
+      giuByte: number
+      suByte: number
+    },
+  ): void {
+    const kB = (b: number) => `${Math.round(b / 1024)} kB`
+    const s = (ms: number | null) => (ms === null ? 'mai' : `${(ms / 1000).toFixed(1)} s fa`)
+    const breve = m.durataMs < 30_000 && m.giuByte > 0
+    this.suDiario(
+      breve ? 'attenzione' : 'info',
+      `Ponte ${porta}: ${causa} dopo ${(m.durataMs / 1000).toFixed(1)} s ` +
+        `(giu ${kB(m.giuByte)}, su ${kB(m.suByte)}; ` +
+        `ultimo byte giu ${s(m.fermoGiuMs)}, su ${s(m.fermoSuMs)}).`,
+    )
   }
 }
