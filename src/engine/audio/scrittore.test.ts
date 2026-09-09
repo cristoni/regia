@@ -82,7 +82,14 @@ function orologio() {
  * Fa girare lo scrittore per un tempo simulato, senza aspettare tempo vero:
  * `dormi` fa avanzare l'orologio finto e cede il turno all'event loop.
  */
-function banco(opzioni: { capienza?: number; audio?: Partial<ImpostazioniAudio> } = {}) {
+function banco(
+  opzioni: {
+    capienza?: number
+    audio?: Partial<ImpostazioniAudio>
+    /** Millisecondi che ogni attesa dorme **in piu** di quanto chiesto. */
+    dormeDiPiu?: number
+  } = {},
+) {
   Presa.azzera()
   const o = orologio()
   const audio = { ...AUDIO, ...opzioni.audio }
@@ -104,7 +111,7 @@ function banco(opzioni: { capienza?: number; audio?: Partial<ImpostazioniAudio> 
     suDiagnostica: (m) => diagnostiche.push(m),
     adesso: o.ora,
     dormi: async (ms) => {
-      o.avanza(Math.max(ms, 1))
+      o.avanza(Math.max(ms, 1) + (opzioni.dormeDiPiu ?? 0))
       await new Promise((r) => setImmediate(r))
     },
   })
@@ -144,6 +151,25 @@ describe('scrittore: il Flusso non si interrompe', () => {
     const dia = b.scrittore.diagnostica()
     assert.ok(dia.scartoMs > 0, 'deve restare avanti all orologio, mai indietro')
     assert.equal(dia.riallineamenti, 0)
+  })
+
+  it('un ritardo cronico si dice una volta sola, non a ogni riallineamento', async () => {
+    // Ogni attesa dorme quasi un secondo di troppo: e piu di quanto anticipo
+    // (200 ms) e tetto di recupero (500 ms) riescano ad assorbire insieme,
+    // quindi si riallinea a ogni giro. E la forma del guasto cronico vero.
+    const b = banco({ dormeDiPiu: 900 })
+    b.scrittore.avvia()
+    await b.gira(120)
+    await b.scrittore.ferma()
+
+    const dia = b.scrittore.diagnostica()
+    assert.ok(dia.riallineamenti > 5, `pochi riallineamenti per la prova: ${dia.riallineamenti}`)
+    assert.ok(dia.ritardoMsAlSecondo > 0, 'il ritmo del ritardo deve essere acceso')
+
+    // Il diario ne deve avere UNA, non una per riallineamento: e un guasto
+    // cronico, e ripeterlo dieci volte al secondo cancella tutto il resto.
+    const righe = b.diagnostiche.filter((m) => /non tiene il tempo reale/.test(m))
+    assert.equal(righe.length, 1, `il diario ha ${righe.length} righe uguali: ${righe.join(' / ')}`)
   })
 })
 

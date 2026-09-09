@@ -92,6 +92,14 @@ mescolati insieme, silenzio digitale quando non c'è nulla da suonare. Non si fe
 l'evento è in corso. Uno per Zona.
 _Evita_: stream, canale, mix, uscita
 
+**Passo del Flusso**:
+Quanto il Flusso di una Zona sta stando dietro al tempo reale, in percentuale. Al 100% un
+secondo di audio esce in un secondo, ed è la condizione normale: l'Operatore non vede niente.
+Sotto, il Flusso scorre più lento dell'orologio — non gli manca audio, gli manca passo — e gli
+Altoparlanti compensano tagliando, che è la cosa che si sente. Compare nel riquadro della Zona
+e nella barra di stato solo quando non tiene.
+_Evita_: buchi, ms persi, Flusso interrotto (promettono audio mancante, che non c'è)
+
 ### Le schermate
 
 **Produzione**:

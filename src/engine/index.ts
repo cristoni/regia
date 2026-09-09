@@ -200,7 +200,7 @@ export class MotoreRegia implements Motore {
           (t) => t.zonaId === z.id && this.telecamere.viva(t.id)?.raggiungibile,
         ).length,
         telecamereTotali: this.progetto.telecamere.filter((t) => t.zonaId === z.id).length,
-        buchiMs: f?.buchiMs ?? 0,
+        ritardoMsAlSecondo: f?.ritardoMsAlSecondo ?? 0,
         suoniAbilitati: z.suoniAbilitati,
         flusso: flussi.get(z.id) ?? '',
         scrittore: f?.scrittore ?? 'fermo',

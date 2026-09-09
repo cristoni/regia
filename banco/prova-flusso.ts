@@ -90,7 +90,7 @@ for (const { flusso, scrittore } of scrittori) {
   console.log(
     `  ${flusso.id.padEnd(15)} ${String(d.blocchiScritti).padStart(6)} blocchi, ` +
       `${(d.byteScritti / 1024).toFixed(0).padStart(6)} KB, scarto ${d.scartoMs.toFixed(0)} ms, ` +
-      `buchi ${d.buchiMs} ms, cadute ${d.cadute}`,
+      `ritardo ${d.ritardoTotaleMs} ms, cadute ${d.cadute}`,
   )
   await scrittore.ferma()
 }

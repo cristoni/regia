@@ -17,27 +17,54 @@
  * disco che si blocca) restano due strade, ed e una scelta di politica:
  *
  *   - RECUPERO: scrivere di colpo tutti i blocchi mancati. Il Flusso resta
- *     completo, ma arriva a raffica.
- *   - RIALLINEAMENTO: rinunciare al pezzo perso e ripartire da adesso. Nel
- *     Flusso resta un buco, ma la cadenza torna subito regolare.
+ *     in pari con l'orologio, ma arriva a raffica.
+ *   - RIALLINEAMENTO: rinunciare a recuperare e ripartire dal tempo di adesso.
+ *     La cadenza torna subito regolare.
  *
  * Si recupera fino a `recuperoMassimoMs` e oltre ci si riallinea. Il valore
  * giusto dipende da come snapserver legge davvero la sorgente TCP, che e una
  * delle misure ancora da fare: qui e una manopola apposta.
+ *
+ * **Riallinearsi non fa buchi nell'audio, e per anni questo file ha detto il
+ * contrario.** Si finge di aver scritto i blocchi saltati, ma il mixer non
+ * avanza sopra di loro: non si perde un campione di cio che e stato prodotto.
+ * Quel che si perde e il passo con il tempo reale -- la timeline scorre piu
+ * lenta dell'orologio. Il danno e a valle e arriva dopo: i client tagliano
+ * campioni per stare in pari (misurato: ~43 tagli al secondo, si sentono), e
+ * la coda che si accumula prima di snapserver si somma alla latenza.
+ *
+ * Per questo il numero che esce di qui e un **ritardo**, non dei buchi, e si
+ * guarda **a ritmo** (ms di ritardo per secondo) e non come totale che sale:
+ * un totale che cresce non distingue «e successo mezz'ora fa» da «sta
+ * succedendo adesso», ed e adesso che conta.
  */
+
+/** Su quanto tempo si misura il ritmo del ritardo. Vedi `ritardoMsAlSecondo`. */
+export const FINESTRA_RITARDO_MS = 30_000
 
 export interface EsitoCadenza {
   /** Blocchi da produrre e scrivere adesso. */
   readonly blocchi: number
-  /** Millisecondi di Flusso buttati via per riallineamento. 0 quasi sempre. */
-  readonly buchiMs: number
+  /**
+   * Millisecondi di tempo reale a cui si e rinunciato adesso, riallineandosi.
+   * Non sono audio mancante: sono passo perso con l'orologio. 0 quasi sempre.
+   */
+  readonly ritardoMs: number
 }
 
 export class Cadenza {
   private avviataA: number | null = null
   private scritti = 0
-  private buchiTotaliMs = 0
+  private ritardoTotaleMs = 0
   private riallineamenti = 0
+  /**
+   * Gli ultimi riallineamenti, per calcolare il ritmo su una finestra mobile.
+   *
+   * Sono pochi per costruzione -- uno ogni volta che si supera il tetto di
+   * recupero -- e si potano a ogni lettura, quindi l'elenco resta corto anche
+   * dopo sei ore.
+   */
+  private recenti: { quando: number; ms: number }[] = []
 
   constructor(
     private readonly bloccoMs: number,
@@ -54,8 +81,9 @@ export class Cadenza {
   avvia(): void {
     this.avviataA = this.adesso()
     this.scritti = 0
-    this.buchiTotaliMs = 0
+    this.ritardoTotaleMs = 0
     this.riallineamenti = 0
+    this.recenti = []
   }
 
   get avviata(): boolean {
@@ -63,7 +91,7 @@ export class Cadenza {
   }
 
   /**
-   * Quanti blocchi scrivere in questo istante, e quanto Flusso e stato perso.
+   * Quanti blocchi scrivere in questo istante, e quanto passo si e perso.
    * Va chiamata subito prima di scrivere: aggiorna il conteggio.
    */
   dovuti(): EsitoCadenza {
@@ -86,22 +114,51 @@ export class Cadenza {
     const perOrologio = Math.floor(trascorso / this.bloccoMs) + 1
     const conAnticipo = Math.floor((trascorso + this.anticipoMs) / this.bloccoMs) + 1
 
-    let buchiMs = 0
+    let ritardoMs = 0
     const ritardo = perOrologio - this.scritti
     const massimo = Math.max(1, Math.floor(this.recuperoMassimoMs / this.bloccoMs))
     if (ritardo > massimo) {
       const saltati = ritardo - massimo
-      buchiMs = saltati * this.bloccoMs
-      this.buchiTotaliMs += buchiMs
+      ritardoMs = saltati * this.bloccoMs
+      this.ritardoTotaleMs += ritardoMs
       this.riallineamenti++
+      this.recenti.push({ quando: this.adesso(), ms: ritardoMs })
       // Si finge di aver scritto anche i saltati: il conteggio torna in pari con
-      // l'orologio e la cadenza riparte regolare al blocco successivo.
+      // l'orologio e la cadenza riparte regolare al blocco successivo. Il mixer
+      // pero non avanza sopra i saltati -- il Flusso non ha buchi, e indietro.
       this.scritti += saltati
     }
 
     const blocchi = Math.max(0, conAnticipo - this.scritti)
     this.scritti += blocchi
-    return { blocchi, buchiMs }
+    return { blocchi, ritardoMs }
+  }
+
+  /**
+   * Quanti millisecondi di ritardo si accumulano ogni secondo, adesso.
+   *
+   * E il numero che dice se le cose stanno andando male **in questo momento**,
+   * e l'unico che si mostra all'Operatore. Zero e la condizione normale; sotto
+   * carico misurato resta zero anche col thread principale bloccato per 28 s su
+   * 40. Un valore stabilmente sopra zero significa che il Flusso non tiene il
+   * tempo reale, e cio che si sente sono i client che tagliano per stare in pari.
+   *
+   * Il denominatore e la finestra vera trascorsa finche e piu corta della
+   * finestra nominale: appena avviati, dividere per trenta secondi che non sono
+   * ancora passati nasconderebbe un guasto proprio quando serve vederlo.
+   */
+  private ritmoRitardo(): number {
+    if (this.avviataA === null) return 0
+    const ora = this.adesso()
+    const taglio = ora - FINESTRA_RITARDO_MS
+    if (this.recenti.length > 0 && this.recenti[0]!.quando < taglio) {
+      this.recenti = this.recenti.filter((r) => r.quando >= taglio)
+    }
+    if (this.recenti.length === 0) return 0
+    const somma = this.recenti.reduce((n, r) => n + r.ms, 0)
+    const finestra = Math.min(FINESTRA_RITARDO_MS, ora - this.avviataA)
+    if (finestra <= 0) return 0
+    return (somma * 1000) / finestra
   }
 
   /**
@@ -133,7 +190,8 @@ export class Cadenza {
   diagnostica(): {
     blocchiScritti: number
     msProdotti: number
-    buchiTotaliMs: number
+    ritardoTotaleMs: number
+    ritardoMsAlSecondo: number
     riallineamenti: number
     scartoMs: number
   } {
@@ -142,7 +200,8 @@ export class Cadenza {
     return {
       blocchiScritti: this.scritti,
       msProdotti: prodotti,
-      buchiTotaliMs: this.buchiTotaliMs,
+      ritardoTotaleMs: this.ritardoTotaleMs,
+      ritardoMsAlSecondo: this.ritmoRitardo(),
       riallineamenti: this.riallineamenti,
       // Positivo = siamo avanti all'orologio, che e come deve essere.
       scartoMs: prodotti - trascorso,

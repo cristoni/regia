@@ -6,7 +6,7 @@
  * E la prova per cui il thread audio esiste. Prima di spostarlo, con quattro
  * scrittori sul thread principale, lo scrittore restava indietro di oltre mezzo
  * secondo e rinunciava a pezzi di Flusso. Qui si fa di peggio -- si blocca il
- * thread principale apposta, ripetutamente -- e si guarda `buchiMs`.
+ * thread principale apposta, ripetutamente -- e si guarda il ritardo accumulato.
  *
  * Il carico e volutamente brutale e sincrono: un ciclo che occupa la CPU per
  * decine di millisecondi, come farebbe una decodifica video andata storta o una
@@ -81,25 +81,25 @@ while (Date.now() < fine) {
 }
 
 const stato = audio.stato()
-console.log('Flusso            stato       buchi     scarto   cadute')
+console.log('Flusso            stato       ritardo   scarto   cadute')
 console.log('----------------- ----------- --------- -------- ------')
 for (const f of stato) {
   console.log(
-    `${f.id.padEnd(17)} ${f.scrittore.padEnd(11)} ${String(f.buchiMs + ' ms').padStart(9)} ` +
+    `${f.id.padEnd(17)} ${f.scrittore.padEnd(11)} ${String(f.ritardoTotaleMs + ' ms').padStart(9)} ` +
       `${String(f.scartoMs + 'ms').padStart(8)} ${String(f.cadute).padStart(6)}`,
   )
 }
 
-const buchi = stato.reduce((n, f) => n + f.buchiMs, 0)
+const ritardo = stato.reduce((n, f) => n + f.ritardoTotaleMs, 0)
 console.log(
   `\nThread principale bloccato per ${(bloccoTotale / 1000).toFixed(1)} s su ${secondi}` +
     ` (blocco piu lungo: ${bloccoMassimo} ms).`,
 )
-console.log(`Flusso perso in totale: ${buchi} ms su ${flussi.length} Flussi.`)
+console.log(`Ritardo sul tempo reale, in totale: ${ritardo} ms su ${flussi.length} Flussi.`)
 console.log(
-  buchi === 0
-    ? 'Nessun buco: il thread audio non si e accorto di niente.'
-    : 'ATTENZIONE: il thread audio ha perso Flusso nonostante sia separato.',
+  ritardo === 0
+    ? 'In pari: il thread audio non si e accorto di niente.'
+    : 'ATTENZIONE: il thread audio ha perso il passo nonostante sia separato.',
 )
 if (diario.length) console.log('\nDiario:\n  ' + diario.slice(0, 8).join('\n  '))
 

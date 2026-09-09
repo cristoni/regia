@@ -15,7 +15,7 @@
 import type { Stato, SuonoVivo, ZonaViva } from '../../engine/api/protocollo'
 import { Elenco, attributo, classe, el, testo, valore, type Voce } from '../nucleo/dom'
 import type { Contesto, Schermata } from '../nucleo/schermata'
-import { effettiDellaZona, inCorso, scorciatoie } from '../nucleo/viste'
+import { effettiDellaZona, inCorso, passoDelFlusso, scorciatoie } from '../nucleo/viste'
 import { GrigliaVideo } from '../video/griglia'
 
 export class Produzione implements Schermata {
@@ -201,12 +201,15 @@ export class Produzione implements Schermata {
         // Lo stato dello scrittore compare solo quando **non** e attivo: in
         // condizioni normali e rumore, e quando non lo e vuol dire che da questa
         // Zona non esce audio, che e la cosa piu importante nella scheda.
+        const passo = passoDelFlusso(z)
         testo(
           conteggi,
           `${z.altoparlantiCollegati}/${z.altoparlantiTotali} audio · ` +
             `${z.telecamereCollegate}/${z.telecamereTotali} video` +
             (z.scrittore === 'attivo' ? '' : `  ·  Flusso ${z.scrittore}`) +
-            (z.buchiMs > 0 ? `  ·  ${Math.round(z.buchiMs)} ms persi` : ''),
+            // Il passo compare solo quando non tiene: un "100%" sempre acceso
+            // sarebbe rumore identico a quello che aveva "0 ms persi".
+            (passo === null ? '' : `  ·  Flusso al ${passo}%`),
         )
         classe(scheda, 'muta', z.scrittore !== 'attivo')
 

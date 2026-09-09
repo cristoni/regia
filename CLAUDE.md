@@ -15,7 +15,7 @@ fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
 ## Comandi
 
 ```bash
-npm test                      # 192 test. Concorrenza 1: ogni motore avvia un thread audio
+npm test                      # 200 test. Concorrenza 1: ogni motore avvia un thread audio
 npm run typecheck             # engine, shell, interfaccia, test dell'interfaccia
 npm run build                 # interfaccia + motore + guscio
 npm run dev                   # compila l'interfaccia e avvia Regia senza finestra, su :7333

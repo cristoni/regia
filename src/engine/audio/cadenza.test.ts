@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { Cadenza } from './cadenza.js'
+import { Cadenza, FINESTRA_RITARDO_MS } from './cadenza.js'
 
 /** Orologio finto: il tempo avanza solo quando lo diciamo noi. */
 function orologio(): { ora: () => number; avanza: (ms: number) => void } {
@@ -24,7 +24,7 @@ describe('cadenza di scrittura', () => {
     const { c } = cadenza()
     const primo = c.dovuti()
     assert.equal(primo.blocchi, ANTICIPO / BLOCCO + 1)
-    assert.equal(primo.buchiMs, 0)
+    assert.equal(primo.ritardoMs, 0)
     assert.equal(c.dovuti().blocchi, 0, 'subito dopo non c e piu niente da scrivere')
   })
 
@@ -73,7 +73,7 @@ describe('cadenza di scrittura', () => {
     }
     const dia = c.diagnostica()
     assert.equal(dia.riallineamenti, 0, 'nessuna pausa era abbastanza lunga per riallineare')
-    assert.equal(dia.buchiTotaliMs, 0)
+    assert.equal(dia.ritardoTotaleMs, 0)
     assert.ok(Math.abs(dia.scartoMs - ANTICIPO) <= BLOCCO, `scarto dopo sei ore: ${dia.scartoMs} ms`)
     assert.ok(dia.msProdotti >= oreInMs, 'abbiamo prodotto meno Flusso del tempo passato')
   })
@@ -81,10 +81,10 @@ describe('cadenza di scrittura', () => {
   it('recupera una pausa breve scrivendo i blocchi mancati', () => {
     const { c, o } = cadenza()
     c.dovuti()
-    o.avanza(100) // cinque blocchi persi, sotto la soglia di recupero
+    o.avanza(100) // cinque blocchi da recuperare, sotto la soglia
     const d = c.dovuti()
     assert.equal(d.blocchi, 5)
-    assert.equal(d.buchiMs, 0, 'una pausa breve non deve lasciare buchi')
+    assert.equal(d.ritardoMs, 0, 'una pausa breve si recupera, senza restare indietro')
   })
 
   it('dopo una pausa lunga si riallinea invece di sparare tutto a raffica', () => {
@@ -96,9 +96,9 @@ describe('cadenza di scrittura', () => {
     // Recupero massimo piu il riempimento dell anticipo, e nulla di piu: mai
     // cinque secondi di Flusso sparati dentro il socket tutti insieme.
     assert.equal(d.blocchi, (RECUPERO + ANTICIPO) / BLOCCO)
-    // Il resto e perso e va detto: 5000 ms passati, 220 gia prodotti prima,
-    // 400 prodotti adesso.
-    assert.equal(d.buchiMs, 4600)
+    // Sul resto si rinuncia a recuperare, e va detto: 5000 ms passati, 220 gia
+    // prodotti prima, 400 prodotti adesso. Non e audio mancante: e passo perso.
+    assert.equal(d.ritardoMs, 4600)
     assert.equal(c.diagnostica().riallineamenti, 1)
   })
 
@@ -140,6 +140,67 @@ describe('cadenza di scrittura', () => {
     assert.throws(() => c.dovuti(), /non avviata/)
   })
 
+  it('il ritmo del ritardo dice quanto si sta rimanendo indietro adesso', () => {
+    const { c, o } = cadenza()
+    c.dovuti()
+    assert.equal(c.diagnostica().ritardoMsAlSecondo, 0, 'appena avviata non c e ritardo')
+
+    // Un secondo di stallo dentro il primo secondo di vita: si rinuncia a
+    // recuperare tutto tranne il tetto, e il ritmo si misura sul tempo vero
+    // trascorso, non sui trenta secondi che non sono ancora passati.
+    o.avanza(1000)
+    const d = c.dovuti()
+    // Del secondo passato si recupera il tetto e si riempie di nuovo l anticipo:
+    // il resto e ritardo.
+    assert.equal(d.ritardoMs, 1000 - RECUPERO - ANTICIPO)
+    const dia = c.diagnostica()
+    assert.ok(
+      dia.ritardoMsAlSecondo > 500,
+      `con 600 ms indietro nel primo secondo il ritmo deve essere alto: ${dia.ritardoMsAlSecondo}`,
+    )
+  })
+
+  it('un intoppo isolato esce dalla finestra e il ritmo torna a zero', () => {
+    const { c, o } = cadenza()
+    c.dovuti()
+    o.avanza(1000)
+    c.dovuti()
+    assert.ok(c.diagnostica().ritardoMsAlSecondo > 0)
+
+    // Passa la finestra scrivendo regolarmente: l intoppo e vecchio, e non
+    // deve piu accendere niente. E la ragione per cui non si mostra un totale.
+    for (let t = 0; t < FINESTRA_RITARDO_MS + 1000; t += BLOCCO) {
+      o.avanza(BLOCCO)
+      c.dovuti()
+    }
+    const dia = c.diagnostica()
+    assert.equal(dia.ritardoMsAlSecondo, 0, 'il ritmo guarda solo la finestra')
+    assert.equal(dia.ritardoTotaleMs, 600, 'il totale invece ricorda tutto')
+  })
+
+  it('un ritardo cronico tiene il ritmo acceso, e lo quantifica', () => {
+    const { c, o } = cadenza()
+    c.dovuti()
+    // Ogni giro si dorme un blocco di troppo oltre quel che anticipo e tetto di
+    // recupero riescono ad assorbire: e la forma del guasto vero, uno scarto
+    // costante fra il nostro orologio e il ritmo con cui la sorgente viene letta.
+    const passo = ANTICIPO + RECUPERO + BLOCCO
+    let giri = 0
+    for (let t = 0; t < FINESTRA_RITARDO_MS * 2; t += passo) {
+      o.avanza(passo)
+      c.dovuti()
+      giri++
+    }
+    assert.ok(giri > 100, 'la prova deve avere abbastanza giri per riempire la finestra')
+    const ritmo = c.diagnostica().ritardoMsAlSecondo
+    // Ogni giro dura `passo` ms e ne lascia indietro `BLOCCO`.
+    const atteso = (BLOCCO * 1000) / passo
+    assert.ok(
+      Math.abs(ritmo - atteso) < atteso * 0.2,
+      `ritmo ${ritmo.toFixed(1)} ms/s lontano dall atteso ${atteso.toFixed(1)}`,
+    )
+  })
+
   it('riavviandola riparte pulita', () => {
     const { c, o } = cadenza()
     c.dovuti()
@@ -151,6 +212,7 @@ describe('cadenza di scrittura', () => {
     const dia = c.diagnostica()
     assert.equal(dia.riallineamenti, 0)
     assert.equal(dia.blocchiScritti, 0)
-    assert.equal(dia.buchiTotaliMs, 0)
+    assert.equal(dia.ritardoTotaleMs, 0)
+    assert.equal(dia.ritardoMsAlSecondo, 0, 'anche la finestra mobile riparte vuota')
   })
 })

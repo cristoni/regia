@@ -455,3 +455,51 @@ telefono sono `[surrogato]` e vanno rifatte con lui.
 - **[misurato]** Il video **non si ricodifica** neanche con l'audio acceso: `-c:v copy`, e solo
   l'audio passa per AAC a 96 kbit/s. Il file con audio della prova pesa 395 kB contro 271 kB dello
   stesso girato senza: ~5 kB/s in più.
+
+---
+
+## L'orologio della distro detta il ritmo, misurato il 9 settembre 2026
+
+Prova con un Pixel 10 vero collegato, quattro Altoparlanti finti ancora accesi dentro la distro e
+un Sottofondo in una Zona. Sintomo osservato dall'Operatore: «i ms persi salgono in continuazione».
+
+- **[misurato]** **L'orologio monotono della distro va il 3,5% piu lento di quello di Windows**:
+  38,780 s di `/proc/uptime` contro 40,192 s misurati sul PC, cioe un rapporto di **0,96487**. Il
+  clocksource in uso e `tsc` grezzo; `hyperv_clocksource_tsc_page` — quello sincronizzato con
+  l'host — e disponibile e **non** selezionato.
+- **[misurato]** Di conseguenza **snapserver legge la sorgente TCP a 169.797 B/s invece di
+  176.400** (96,26%): scandisce le `async_read` da `chunk_ms` sul proprio orologio, e quel ritmo e
+  il suo, non il nostro.
+- **[misurato]** Il buffer di ricezione della sorgente resta quindi **fisso al tetto**:
+  `skmem:(r128832,rb131072)`, cioe 128 KB ≈ **730 ms di audio fermi in coda**, permanenti. Da li in
+  poi il ritmo non lo detta piu la `Cadenza`, lo detta la contropressione: lo scrittore resta
+  stabilmente oltre mezzo secondo indietro al proprio orologio, riallinea, e i buchi salgono di
+  **~25 ms al secondo per sempre**. Lo scarto oscilla fra -534 e +183 ms invece di stare fermo a
+  +200 come nella misura con soli Altoparlanti finti.
+- **[misurato]** ⚠️ **Quei riallineamenti non tolgono contenuto, ma l'audio non e liscio
+  lo stesso.** `Cadenza` finge di aver scritto i blocchi saltati e **non fa avanzare il mixer**,
+  quindi non si perde niente della forma d'onda prodotta: la timeline scorre al 96,5% del tempo
+  reale. Il danno arriva a valle. Catturando ventuno secondi dal player di uno snapclient vero nel
+  gruppo della Zona (`--player file:filename=...`), il tono di 440 Hz misurato **campione per
+  campione** ha **917 discontinuita, cioe ~43 al secondo**, ciascuna da 0,45 ms (20 campioni) o
+  0,91 ms (40 campioni), per un totale di **-457 ms su 21 s = -2,2% di forma d'onda asportata**.
+  L'intonazione resta esatta (440,1 Hz), il livello e fermo (RMS 1024-1027): a tagliare e il
+  client, per stare in pari. Su una sinusoide sono salti di fase, e si sentono come una raspa.
+  → Guardare l'RMS secondo per secondo **non basta** per dire che un Flusso e integro: nasconde
+  qualunque taglio piu corto del secondo. Si guarda la fase.
+  → La cattura viene da un client **dentro la distro**, che condivide l'orologio storto del
+  server: un telefono con l'orologio buono deve compensare uno scarto piu grande, non piu piccolo.
+- **[misurato]** Quel che cresce, oltre ai tagli, e la **latenza**: `bufferMs` + `anticipoMs` + i
+  730 ms di coda fanno **~2,9 s** contro i 2,2 s che `latenzaAttesaMs()` dichiara.
+  → Da qui il contatore «ms persi» e stato rifatto: misurava una cosa vera (il passo perso col
+  tempo reale) con una parola falsa (audio mancante), e nella barra di stato diceva «Flusso
+  interrotto» acceso fisso. Adesso `Cadenza` espone un **ritmo** -- `ritardoMsAlSecondo` su una
+  finestra mobile di trenta secondi -- e l'interfaccia lo mostra come «Flusso al 97%» solo sopra
+  soglia. Un totale che sale non distingue «e successo mezz'ora fa» da «sta succedendo adesso».
+  → Il nome «ms persi» promette all'Operatore un danno che non c'e. Misura una cosa vera (stiamo
+  producendo piu lentamente del tempo reale) con la parola sbagliata.
+- **[misurato]** La connessione RPC di controllo va a **`127.0.0.1:1705`** (`OPZIONI_RPC` in
+  `snapcast/rpc.ts`), mentre le sorgenti audio vanno all'IP della distro. E esattamente il percorso
+  che l'ADR 0010 vieta, e il commento a `suIndirizzoDistro` in `supervisore.ts` lo dice a due
+  schermate di distanza. Regge solo perche `collegaEVerifica()` pretende una risposta vera a
+  `Server.GetStatus` prima di dichiararsi acceso.

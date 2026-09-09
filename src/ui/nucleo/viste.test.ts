@@ -17,6 +17,7 @@ import {
   daQuando,
   effettiDellaZona,
   inCorso,
+  passoDelFlusso,
   riepilogoSetup,
   salute,
   scorciatoie,
@@ -33,7 +34,7 @@ function zona(id: string, extra: Partial<ZonaViva> = {}): ZonaViva {
   return {
     id, nome: id, colore: '#112233', volume: 1, sottofondoId: null,
     effettiInCorso: [], altoparlantiCollegati: 1, altoparlantiTotali: 1,
-    telecamereCollegate: 0, telecamereTotali: 0, buchiMs: 0,
+    telecamereCollegate: 0, telecamereTotali: 0, ritardoMsAlSecondo: 0,
     suoniAbilitati: null, flusso: id, scrittore: 'attivo', scartoMs: 200, ...extra,
   }
 }
@@ -151,11 +152,50 @@ describe('la barra di stato', () => {
   it('dice la cosa peggiore, non la prima', () => {
     const s = stato({
       server: 'caduto',
-      zone: [zona('z1', { buchiMs: 40 })],
+      zone: [zona('z1', { ritardoMsAlSecondo: 40 })],
       registrazione: { attive: 0, spazioLiberoGb: 1, sottoAvviso: true, bloccata: true, cartella: 'C:/V' },
     })
     assert.equal(salute(s).livello, 'grave')
     assert.match(salute(s).testo, /server audio/)
+  })
+
+  it('tace su un Flusso che tiene il tempo reale', () => {
+    // Zero e la condizione normale, e prima qui usciva "Flusso interrotto"
+    // acceso fisso: un allarme falso durante uno spettacolo.
+    const s = stato({ zone: [zona('z1', { ritardoMsAlSecondo: 0 })] })
+    assert.equal(salute(s).livello, 'info')
+    assert.equal(passoDelFlusso(zona('z1', { ritardoMsAlSecondo: 0 })), null)
+  })
+
+  it('tace anche su un ritardo sotto la soglia: non si allarma per un intoppo', () => {
+    const s = stato({ zone: [zona('z1', { ritardoMsAlSecondo: 4 })] })
+    assert.equal(salute(s).livello, 'info')
+    assert.equal(passoDelFlusso(zona('z1', { ritardoMsAlSecondo: 4 })), null)
+  })
+
+  it('dice che il Flusso non tiene il tempo reale, non che e interrotto', () => {
+    const s = stato({ zone: [zona('z1', { ritardoMsAlSecondo: 25 })] })
+    const v = salute(s)
+    assert.equal(v.livello, 'attenzione')
+    assert.match(v.testo, /non tiene il tempo reale/)
+    assert.match(v.testo, /25 ms al secondo/)
+    assert.doesNotMatch(v.testo, /interrott|pers/i, 'non deve promettere audio mancante')
+    // 25 ms al secondo sono il 2,5% del tempo reale: il caso misurato.
+    assert.equal(passoDelFlusso(zona('z1', { ritardoMsAlSecondo: 25 })), 98)
+  })
+
+  it('con piu Zone indietro nomina la peggiore', () => {
+    const s = stato({
+      zone: [
+        zona('z1', { ritardoMsAlSecondo: 8 }),
+        zona('z2', { ritardoMsAlSecondo: 40 }),
+        zona('z3', { ritardoMsAlSecondo: 0 }),
+      ],
+    })
+    const v = salute(s)
+    assert.match(v.testo, /2 Zone/)
+    assert.match(v.testo, /peggio z2/)
+    assert.match(v.testo, /40 ms al secondo/)
   })
 
   it('non si lamenta di un Altoparlante non assegnato: e lo stato normale', () => {

@@ -195,8 +195,21 @@ export interface ZonaViva {
   readonly altoparlantiTotali: number
   readonly telecamereCollegate: number
   readonly telecamereTotali: number
-  /** Millisecondi di Flusso persi per riallineamento. Sopra zero e un sintomo. */
-  readonly buchiMs: number
+  /**
+   * Quanti millisecondi di ritardo sul tempo reale il Flusso accumula ogni
+   * secondo, misurati sugli ultimi trenta secondi (`FINESTRA_RITARDO_MS`).
+   *
+   * **Non e audio mancante**, ed e la ragione per cui non si chiama piu
+   * `buchiMs`: il mixer non salta niente, la timeline scorre piu lenta
+   * dell'orologio. Il sintomo che si sente sono i client che tagliano campioni
+   * per stare in pari, e la coda prima di snapserver che si somma alla latenza.
+   *
+   * Zero e la condizione normale, anche sotto carico: nel banco con il thread
+   * principale bloccato per 28 s su 40 resta zero. Sopra la soglia
+   * dell'interfaccia (`SOGLIA_RITARDO_MS_AL_SECONDO` in `ui/nucleo/viste.ts`)
+   * si mostra all'Operatore, sotto non si mostra niente.
+   */
+  readonly ritardoMsAlSecondo: number
   /** `null` = tutta la libreria. La schermata Zone ha bisogno di distinguerlo. */
   readonly suoniAbilitati: readonly string[] | null
   /** Lo stream Snapcast che serve questa Zona, per la diagnostica. */

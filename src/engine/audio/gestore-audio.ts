@@ -120,7 +120,8 @@ export class GestoreAudio {
         effetti: m.effetti,
         sottofondoAttivo: m.sottofondoAttivo,
         scrittore: d.stato,
-        buchiMs: d.buchiMs,
+        ritardoMsAlSecondo: Math.round(d.ritardoMsAlSecondo),
+        ritardoTotaleMs: d.ritardoTotaleMs,
         scartoMs: Math.round(d.scartoMs),
         cadute: d.cadute,
       }

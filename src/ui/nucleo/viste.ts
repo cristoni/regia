@@ -10,6 +10,31 @@
  */
 import type { Stato, SuonoVivo, TelecameraViva, ZonaViva } from '../../engine/api/protocollo'
 
+// ------------------------------------------------------- il passo del Flusso
+
+/**
+ * Sopra quanti millisecondi di ritardo al secondo si avvisa l'Operatore.
+ *
+ * Cinque su mille sono lo 0,5% del tempo reale, e sotto quella soglia non c'e
+ * niente da dire: un singolo intoppo -- un garbage collector, un disco che si
+ * ferma -- si spalma sulla finestra di trenta secondi e non arriva qui. Quel
+ * che deve accendersi e la condizione **cronica**, che e l'unica che si sente:
+ * a 25 ms al secondo (il caso misurato, orologio della distro storto) i client
+ * tagliano una quarantina di volte al secondo.
+ */
+export const SOGLIA_RITARDO_MS_AL_SECONDO = 5
+
+/**
+ * A che percentuale del tempo reale sta scorrendo il Flusso di una Zona.
+ *
+ * `null` quando non c'e niente da mostrare: e il caso normale, e una scheda
+ * senza numeri e una scheda che va bene.
+ */
+export function passoDelFlusso(zona: ZonaViva): number | null {
+  if (zona.ritardoMsAlSecondo < SOGLIA_RITARDO_MS_AL_SECONDO) return null
+  return Math.max(0, Math.round(100 - zona.ritardoMsAlSecondo / 10))
+}
+
 // ------------------------------------------------------------------ Suoni
 
 /**
@@ -160,13 +185,23 @@ export function salute(stato: Stato): Salute {
     }
   }
 
-  const conBuchi = stato.zone.filter((z) => z.buchiMs > 0)
-  if (conBuchi.length > 0) {
+  // Non "Flusso interrotto": il Flusso non ha buchi. Sta scorrendo piu lento
+  // del tempo reale, e cio che l'Operatore sente sono i telefoni che tagliano
+  // campioni per stare in pari. Dirgli "interrotto" gli farebbe cercare un
+  // guasto di rete che non c'e.
+  const indietro = stato.zone.filter((z) => z.ritardoMsAlSecondo >= SOGLIA_RITARDO_MS_AL_SECONDO)
+  if (indietro.length > 0) {
+    const peggiore = indietro.reduce((a, b) =>
+      b.ritardoMsAlSecondo > a.ritardoMsAlSecondo ? b : a,
+    )
+    const dove =
+      indietro.length === 1 ? `"${peggiore.nome}"` : `${indietro.length} Zone (peggio ${peggiore.nome})`
     return {
       livello: 'attenzione',
-      testo: `Flusso interrotto in ${conBuchi.length} Zone: ${conBuchi
-        .map((z) => `${z.nome} (${Math.round(z.buchiMs)} ms)`)
-        .join(', ')}`,
+      testo:
+        `Il Flusso di ${dove} non tiene il tempo reale ` +
+        `(${Math.round(peggiore.ritardoMsAlSecondo)} ms al secondo): ` +
+        'gli Altoparlanti compensano tagliando, e si sente.',
     }
   }
   if (stato.registrazione.sottoAvviso) {

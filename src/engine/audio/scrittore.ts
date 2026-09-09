@@ -49,7 +49,10 @@ export interface DiagnosticaScrittore {
   readonly stato: StatoScrittore
   readonly blocchiScritti: number
   readonly byteScritti: number
-  readonly buchiMs: number
+  /** Ritardo totale accumulato sul tempo reale dall'avvio. Per il banco. */
+  readonly ritardoTotaleMs: number
+  /** Ritardo che si accumula ogni secondo, adesso. E quello che si mostra. */
+  readonly ritardoMsAlSecondo: number
   readonly riallineamenti: number
   readonly scartoMs: number
   readonly cadute: number
@@ -91,6 +94,7 @@ export class Scrittore {
   private attesePerScarico = 0
   /** Vero fra il primo fallimento di collegamento e il ritorno. */
   private fallimentoSegnalato = false
+  private ritardoSegnalato = false
 
   /** Allocati una volta e riusati: nel ciclo di scrittura non si alloca mai. */
   private readonly blocco: Int16Array
@@ -176,12 +180,20 @@ export class Scrittore {
   diagnostica(): DiagnosticaScrittore {
     const c = this.cadenza.avviata
       ? this.cadenza.diagnostica()
-      : { blocchiScritti: 0, msProdotti: 0, buchiTotaliMs: 0, riallineamenti: 0, scartoMs: 0 }
+      : {
+          blocchiScritti: 0,
+          msProdotti: 0,
+          ritardoTotaleMs: 0,
+          ritardoMsAlSecondo: 0,
+          riallineamenti: 0,
+          scartoMs: 0,
+        }
     return {
       stato: this.stato,
       blocchiScritti: c.blocchiScritti,
       byteScritti: this.byteScritti,
-      buchiMs: c.buchiTotaliMs,
+      ritardoTotaleMs: c.ritardoTotaleMs,
+      ritardoMsAlSecondo: c.ritardoMsAlSecondo,
       riallineamenti: c.riallineamenti,
       scartoMs: c.scartoMs,
       cadute: this.cadute,
@@ -259,13 +271,16 @@ export class Scrittore {
     // senso, e ripartire dal conteggio precedente produrrebbe una scrittura a
     // raffica di tutto cio che e stato "perso" mentre eravamo scollegati.
     this.cadenza.avvia()
+    // Anche il racconto del ritardo riparte: la finestra e vuota, e un episodio
+    // che ricominciasse adesso e una notizia nuova.
+    this.ritardoSegnalato = false
     this.stato = 'attivo'
     return true
   }
 
   private async scriviQuantoDovuto(): Promise<void> {
-    const { blocchi, buchiMs } = this.cadenza.dovuti()
-    if (buchiMs > 0) this.suDiagnostica(`riallineamento: persi ${buchiMs} ms di Flusso`)
+    const { blocchi, ritardoMs } = this.cadenza.dovuti()
+    this.raccontaIlRitardo(ritardoMs)
 
     for (let i = 0; i < blocchi; i++) {
       if (this.fermare) return
@@ -282,6 +297,39 @@ export class Scrittore {
         this.attesePerScarico++
         await this.attendiScaricoOScade(d)
       }
+    }
+  }
+
+  /**
+   * Il ritardo si dice una volta sola, e poi si tace finche non passa.
+   *
+   * Un guasto cronico -- l'orologio della distro storto, per dire -- fa scattare
+   * un riallineamento **piu volte al secondo**, su ogni Flusso. Scrivendone una
+   * riga ciascuno, il diario si riempie di righe identiche e ci si perde dentro
+   * tutto il resto: dopo un minuto non c'e piu traccia di quel che e successo
+   * prima, che e esattamente cio che si va a cercare quando qualcosa va storto.
+   * E la stessa ragione per cui `fallimentoSegnalato` tace sui collegamenti.
+   *
+   * Il ritmo, che e il numero che conta, sta gia nell'istantanea dieci volte al
+   * secondo: qui serve solo il fronte -- e cominciato, e finito.
+   */
+  private raccontaIlRitardo(ritardoMs: number): void {
+    if (ritardoMs > 0) {
+      if (this.ritardoSegnalato) return
+      this.ritardoSegnalato = true
+      // "Rimasto indietro", non "perso": il Flusso non ha buchi. Vedi `Cadenza`.
+      this.suDiagnostica(
+        `il Flusso non tiene il tempo reale (${ritardoMs} ms non recuperati): ` +
+          'gli Altoparlanti compensano tagliando',
+      )
+      return
+    }
+    // Si torna a tacere solo quando la finestra si e svuotata davvero: fra un
+    // riallineamento e il successivo passano molti giri con ritardo zero, e
+    // fidarsi di quelli farebbe lampeggiare la riga invece di dirla una volta.
+    if (this.ritardoSegnalato && this.cadenza.diagnostica().ritardoMsAlSecondo === 0) {
+      this.ritardoSegnalato = false
+      this.suDiagnostica('il Flusso ha ripreso il tempo reale')
     }
   }
 

@@ -41,7 +41,14 @@ export interface StatoFlusso {
   readonly effetti: readonly EffettoInCorso[]
   readonly sottofondoAttivo: boolean
   readonly scrittore: StatoScrittore
-  readonly buchiMs: number
+  /** Ritmo attuale del ritardo: e questo che arriva all'Operatore. */
+  readonly ritardoMsAlSecondo: number
+  /**
+   * Ritardo totale accumulato dall'avvio. Non esce di qui: serve al banco, dove
+   * la domanda e "in quaranta secondi di carico quanto abbiamo perso il passo",
+   * e li un totale dice piu di un ritmo istantaneo.
+   */
+  readonly ritardoTotaleMs: number
   readonly scartoMs: number
   readonly cadute: number
 }

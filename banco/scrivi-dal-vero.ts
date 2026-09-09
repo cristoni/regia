@@ -102,7 +102,7 @@ console.log(
     `${secondi} s per ogni valore di anticipo.\n`,
 )
 
-console.log('anticipo | latenza | risincronizzazioni               | chunk persi | scarto | buchi')
+console.log('anticipo | latenza | risincronizzazioni               | chunk persi | scarto | ritardo')
 console.log('---------|---------|---------------------------------|-------------|--------|------')
 
 for (const anticipo of anticipi) {
@@ -133,7 +133,7 @@ for (const anticipo of anticipi) {
   const scartoMedio = Math.round(
     diagnostiche.reduce((n, d) => n + d.scartoMs, 0) / diagnostiche.length,
   )
-  const buchi = diagnostiche.reduce((n, d) => n + d.buchiMs, 0)
+  const ritardo = diagnostiche.reduce((n, d) => n + d.ritardoTotaleMs, 0)
   const dure = resync.filter((v) => v > 500).length
 
   const riassunto =
@@ -146,14 +146,15 @@ for (const anticipo of anticipi) {
   console.log(
     `${String(anticipo).padStart(6)}ms | ${String(audio.bufferMs + anticipo).padStart(5)}ms | ` +
       `${riassunto.padEnd(31)} | ${String(falliti).padStart(11)} | ` +
-      `${String(scartoMedio).padStart(4)}ms | ${buchi} ms`,
+      `${String(scartoMedio).padStart(4)}ms | ${ritardo} ms`,
   )
 }
 
 await rpc.chiudi()
 console.log(`
 Come si legge: contano solo le risincronizzazioni DURE (sopra 500 ms) -- sono le
-uniche che si sentono -- e i chunk persi, che sono buchi nell audio. La latenza e
+uniche che si sentono -- e i chunk persi, che sono davvero buchi nell audio (il
+ritardo dell ultima colonna invece non e audio mancante). La latenza e
 cio che l Operatore aspettera fra il pulsante e l urlo. Si sceglie l anticipo piu
 piccolo che non produce ne DURE ne chunk persi.
 `)
