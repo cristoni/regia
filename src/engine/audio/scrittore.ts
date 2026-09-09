@@ -77,6 +77,8 @@ export class Scrittore {
   private byteScritti = 0
   private cadute = 0
   private attesePerScarico = 0
+  /** Vero fra il primo fallimento di collegamento e il ritorno. */
+  private fallimentoSegnalato = false
 
   /** Allocati una volta e riusati: nel ciclo di scrittura non si alloca mai. */
   private readonly blocco: Int16Array
@@ -186,9 +188,20 @@ export class Scrittore {
     try {
       this.destinazione = await this.collega()
     } catch (e) {
-      this.suDiagnostica(`collegamento fallito: ${(e as Error).message}`)
+      // Si segnala il primo fallimento e poi si tace fino al ritorno. Il caso
+      // normale e "il server audio non e ancora acceso": riprovare due volte al
+      // secondo e giusto, dirlo due volte al secondo riempirebbe il diario di
+      // migliaia di righe identiche e nasconderebbe tutto il resto.
+      if (!this.fallimentoSegnalato) {
+        this.fallimentoSegnalato = true
+        this.suDiagnostica(`collegamento fallito: ${(e as Error).message}`)
+      }
       await this.dormi(this.attesaRiprovaMs)
       return false
+    }
+    if (this.fallimentoSegnalato) {
+      this.fallimentoSegnalato = false
+      this.suDiagnostica('collegamento ristabilito')
     }
     // Timeline azzerata: dopo una riconnessione i blocchi vecchi non hanno piu
     // senso, e ripartire dal conteggio precedente produrrebbe una scrittura a

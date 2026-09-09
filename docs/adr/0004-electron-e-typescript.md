@@ -40,6 +40,11 @@ decodifica H.264 hardware va fatta con Media Foundation e la griglia disegnata a
 ## Conseguenze
 
 - Il mixer sta in un `worker_thread`, mai sul thread che ridisegna sei anteprime video.
+  **Verificato, e non era teoria**: con mixer e scrittori sul thread principale, sotto un carico
+  modesto, lo scrittore restava indietro di oltre mezzo secondo e rinunciava a pezzi di Flusso.
+  Spostati nel thread audio e bloccando il thread principale per 28,4 secondi su 40, i Flussi
+  hanno perso 0 ms. Il confine non trasporta campioni: i Suoni li legge il thread audio dalla
+  cache su disco, cosi un Sottofondo da 31 MB non viene ne copiato ne duplicato.
 - I buffer PCM sono preallocati e riusati: nessuna allocazione nel ciclo di mixaggio.
 - Le password delle Telecamere richiedono un modulo nativo per DPAPI (§6).
 - MJPEG in un `<img>` resta come ripiego se WebCodecs dà problemi su qualche GPU: costa una

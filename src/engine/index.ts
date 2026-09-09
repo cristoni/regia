@@ -5,11 +5,16 @@
  * (ADR 0004): si avvia da qui, dal guscio, o da uno script di collaudo, e in
  * tutti e tre i casi si comporta allo stesso modo.
  *
- * Cosa e collegato oggi: progetto, Zone, libreria dei Suoni, mixer per Zona,
- * riproduzione. Cosa non lo e ancora: la distro WSL, il JSON-RPC verso
- * snapserver, le Telecamere e la registrazione. Quei comandi rispondono con un
- * errore esplicito invece di far finta -- un motore che dice "non ancora" e
- * utile, uno che finge non lo e.
+ * Cosa e collegato oggi: progetto, Zone, libreria dei Suoni, e il **thread
+ * audio** che tiene mixer e scrittori. Cosa non lo e ancora: la distro WSL, il
+ * JSON-RPC verso snapserver, le Telecamere e la registrazione. Quei comandi
+ * rispondono con un errore esplicito invece di far finta -- un motore che dice
+ * "non ancora" e utile, uno che finge non lo e.
+ *
+ * Qui dentro non c'e nessun mixer. Stanno tutti nel thread audio, dietro
+ * `MotoreAudio`: e la conseguenza di una misura, non di un gusto. Sul thread
+ * principale, sotto carico, lo scrittore restava indietro di oltre mezzo
+ * secondo e rinunciava a pezzi di Flusso.
  */
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -26,7 +31,8 @@ import {
 } from './dominio/progetto.js'
 import { ArchivioProgetto } from './progetto/archivio.js'
 import { LibreriaSuoni } from './audio/libreria.js'
-import { MixerZona } from './audio/mixer.js'
+import { MotoreAudio } from './audio/motore-audio.js'
+import { flussiDi } from './snapcast/configurazione.js'
 import { OPZIONI_PREDEFINITE, Servitore, type Motore, type OpzioniServitore } from './api/servitore.js'
 import type { Comando, Evento, Stato, ZonaViva } from './api/protocollo.js'
 
@@ -51,7 +57,8 @@ class NonAncora extends Error {
 
 export class MotoreRegia implements Motore {
   private progetto: Progetto
-  private readonly mixer = new Map<string, MixerZona>()
+  /** I Suoni che il thread audio ha confermato di avere in memoria. */
+  private readonly suoniPronti = new Map<string, number>()
   private readonly ascoltatoriVideo: ((id: string, chiave: boolean, d: Uint8Array) => void)[] = []
   private readonly ascoltatoriDiario: ((e: Extract<Evento, { tipo: 'diario' }>) => void)[] = []
   private readonly avvisi: { livello: 'info' | 'attenzione' | 'grave'; testo: string }[] = []
@@ -61,9 +68,10 @@ export class MotoreRegia implements Motore {
     progetto: Progetto,
     private readonly archivio: ArchivioProgetto,
     private readonly libreria: LibreriaSuoni,
+    private readonly audio: MotoreAudio,
   ) {
     this.progetto = progetto
-    for (const z of progetto.zone) this.creaMixer(z)
+    this.riconfiguraAudio()
   }
 
   // ------------------------------------------------------------- lettura
@@ -80,23 +88,25 @@ export class MotoreRegia implements Motore {
     }
 
     const zone: ZonaViva[] = zoneOrdinate(this.progetto).map((z) => {
-      const m = this.mixer.get(z.id)?.stato()
+      // Lo stato arriva dal thread audio a intervalli regolari: si legge cio
+      // che e arrivato per ultimo, senza mai aspettare.
+      const f = this.audio.statoDi(z.id)
       return {
         id: z.id,
         nome: z.nome,
         colore: z.colore,
-        // Il volume vero e quello nel mixer: e li che viene applicato, e in un
-        // istante in cui il comando fosse a meta strada sarebbero diversi.
-        volume: m?.volume ?? z.volume,
-        sottofondoId: m?.sottofondoAttivo ? z.sottofondoId : null,
+        // Il volume vero e quello applicato nel mix, non quello nel progetto:
+        // in un istante in cui il comando fosse per strada sarebbero diversi.
+        volume: f?.volume ?? z.volume,
+        sottofondoId: f?.sottofondoAttivo ? z.sottofondoId : null,
         // Con l'identificativo del Suono, non solo il conteggio: e cosi che
         // l'interfaccia sa quale pulsante illuminare (§5.2).
-        effettiInCorso: m?.effetti ?? [],
+        effettiInCorso: f?.effetti ?? [],
         altoparlantiCollegati: 0,
         altoparlantiTotali: collegati.get(z.id) ?? 0,
         telecamereCollegate: 0,
         telecamereTotali: this.progetto.telecamere.filter((t) => t.zonaId === z.id).length,
-        buchiMs: 0,
+        buchiMs: f?.buchiMs ?? 0,
       }
     })
 
@@ -116,8 +126,9 @@ export class MotoreRegia implements Motore {
       })),
       suoni: this.progetto.suoni.map((s) => ({
         id: s.id, nome: s.nome, colore: s.colore, categoria: s.categoria,
-        durataMs: s.durataMs, tastoRapido: s.tastoRapido,
-        pronto: this.libreria.ottieni(s.id) !== undefined,
+        durataMs: s.durataMs ?? this.suoniPronti.get(s.id) ?? null,
+        tastoRapido: s.tastoRapido,
+        pronto: this.suoniPronti.has(s.id),
       })),
       registrazione: {
         attive: 0, spazioLiberoGb: 0, sottoAvviso: false, bloccata: false,
@@ -171,12 +182,15 @@ export class MotoreRegia implements Motore {
           suoniAbilitati: null,
         }
         this.progetto.zone.push(z)
-        this.creaMixer(z)
+        this.riconfiguraAudio()
         this.diario('info', `Creata la Zona "${z.nome}"`)
         break
       }
       case 'zona.rinomina':
         this.zona(c.zonaId).nome = c.nome
+        // Il nome della Zona *e* l'identificativo del suo stream Snapcast
+        // (ADR 0005): rinominarla cambia la configurazione del server.
+        this.riconfiguraAudio()
         break
       case 'zona.colore':
         this.zona(c.zonaId).colore = c.colore
@@ -185,35 +199,37 @@ export class MotoreRegia implements Motore {
         const o = this.zona(c.zonaId)
         const z: Zona = { ...o, id: this.nuovoId('z'), nome: `${o.nome} (copia)`, ordine: this.progetto.zone.length }
         this.progetto.zone.push(z)
-        this.creaMixer(z)
+        this.riconfiguraAudio()
         break
       }
       case 'zona.elimina': {
         const z = this.zona(c.zonaId)
         this.progetto.zone = this.progetto.zone.filter((x) => x.id !== c.zonaId)
-        this.mixer.delete(c.zonaId)
         // I dispositivi non si cancellano: tornano non assegnati, che e lo stato
         // normale di un telefono acceso ma non ancora messo in una stanza.
         for (const a of this.progetto.altoparlanti) if (a.zonaId === c.zonaId) a.zonaId = null
         for (const t of this.progetto.telecamere) if (t.zonaId === c.zonaId) t.zonaId = null
+        this.riconfiguraAudio()
         this.diario('info', `Eliminata la Zona "${z.nome}"`)
         break
       }
       case 'zona.riordina':
         for (const [i, id] of c.ordine.entries()) this.zona(id).ordine = i
+        // L'ordine decide le porte delle sorgenti: riordinare le rimescola.
+        this.riconfiguraAudio()
         break
       case 'zona.sottofondo': {
         const z = this.zona(c.zonaId)
         z.sottofondoId = c.suonoId
-        const m = this.mixer.get(z.id)
-        if (!m) break
-        if (!c.suonoId) m.impostaSottofondo(null)
-        else {
-          const s = this.suono(c.suonoId)
-          const campionato = this.libreria.ottieni(c.suonoId)
-          if (!campionato) throw new Error(`il Suono "${s.nome}" non e ancora pronto`)
-          m.impostaSottofondo(campionato, s.guadagno)
+        if (c.suonoId === null) {
+          this.audio.sottofondo(z.id, null, 1)
+          break
         }
+        const s = this.suono(c.suonoId)
+        if (!this.suoniPronti.has(c.suonoId)) {
+          throw new Error(`il Suono "${s.nome}" non e ancora pronto`)
+        }
+        this.audio.sottofondo(z.id, c.suonoId, s.guadagno)
         break
       }
       case 'zona.suoniAbilitati':
@@ -222,31 +238,32 @@ export class MotoreRegia implements Motore {
 
       case 'zona.suona': {
         const s = this.suono(c.suonoId)
-        const campionato = this.libreria.ottieni(c.suonoId)
-        if (!campionato) throw new Error(`il Suono "${s.nome}" non e ancora pronto`)
+        if (!this.suoniPronti.has(c.suonoId)) {
+          throw new Error(`il Suono "${s.nome}" non e ancora pronto`)
+        }
+        // Si convalida TUTTO prima di mandare qualunque cosa al thread audio:
+        // meglio un rifiuto netto che l'urlo che parte in due stanze su tre.
         for (const zonaId of c.zone) {
           const z = this.zona(zonaId)
-          const m = this.mixer.get(zonaId)
-          if (!m) continue
           const ammessi = effettiDellaZona(this.progetto, z)
           if (!ammessi.some((x) => x.id === c.suonoId)) {
             throw new Error(`"${s.nome}" non e abilitato nella Zona "${z.nome}"`)
           }
-          if (c.esclusivo) m.avviaEffettoEsclusivo(campionato, s.guadagno)
-          else m.avviaEffetto(campionato, s.guadagno)
         }
+        this.audio.suona(c.zone, c.suonoId, s.guadagno, c.esclusivo)
         break
       }
       case 'zona.volume': {
         this.zona(c.zonaId).volume = c.volume
-        this.mixer.get(c.zonaId)?.impostaVolume(c.volume)
+        this.audio.volume(c.zonaId, c.volume)
         break
       }
       case 'zona.stop':
-        this.mixer.get(c.zonaId)?.fermaEffetti()
+        this.zona(c.zonaId)
+        this.audio.stopZona(c.zonaId)
         break
       case 'stopTutto':
-        for (const m of this.mixer.values()) m.fermaEffetti()
+        this.audio.stopTutto()
         this.diario('attenzione', 'STOP TUTTO')
         break
 
@@ -260,8 +277,12 @@ export class MotoreRegia implements Motore {
             durataMs: null, tastoRapido: null, ordine: this.progetto.suoni.length,
           }
           this.progetto.suoni.push(s)
-          const esito = await this.libreria.prepara(s, this.progetto.audio)
+          const esito = await this.libreria.assicura(s, this.progetto.audio)
           s.durataMs = esito.durataMs
+          // Si aspetta che il thread audio abbia davvero i campioni: quando
+          // questo comando torna, il pulsante funziona.
+          await this.audio.caricaSuono(s.id, esito.percorso)
+          this.suoniPronti.set(s.id, esito.durataMs)
           this.diario('info', `Importato il Suono "${s.nome}"`)
         }
         break
@@ -270,10 +291,12 @@ export class MotoreRegia implements Motore {
         const s = this.suono(c.suonoId)
         this.progetto.suoni = this.progetto.suoni.filter((x) => x.id !== c.suonoId)
         this.libreria.dimentica(c.suonoId)
+        this.suoniPronti.delete(c.suonoId)
+        this.audio.scaricaSuono(c.suonoId)
         for (const z of this.progetto.zone) {
           if (z.sottofondoId === c.suonoId) {
             z.sottofondoId = null
-            this.mixer.get(z.id)?.impostaSottofondo(null)
+            this.audio.sottofondo(z.id, null, 1)
           }
           if (z.suoniAbilitati) z.suoniAbilitati = z.suoniAbilitati.filter((x) => x !== c.suonoId)
         }
@@ -349,8 +372,29 @@ export class MotoreRegia implements Motore {
 
   // -------------------------------------------------------------- interni
 
-  private creaMixer(z: Zona): void {
-    this.mixer.set(z.id, new MixerZona(this.progetto.audio, z.volume))
+  /**
+   * Ridice al thread audio quali Flussi servire.
+   *
+   * Si chiama a ogni cambiamento che tocchi le Zone -- creazione, rinomina,
+   * riordino, eliminazione -- perche ognuno di quelli cambia anche la
+   * configurazione di snapserver (ADR 0005). Succede in Setup, dove ricostruire
+   * mixer e socket non costa nulla.
+   */
+  private riconfiguraAudio(): void {
+    this.audio.configura(
+      this.progetto.audio,
+      flussiDi(this.progetto).map((f) => ({
+        id: f.id,
+        zonaId: f.zonaId,
+        porta: f.porta,
+        volume: f.zonaId ? (this.progetto.zone.find((z) => z.id === f.zonaId)?.volume ?? 1) : 1,
+      })),
+    )
+  }
+
+  /** Il thread audio conferma di avere un Suono in memoria. */
+  segnaSuonoPronto(suonoId: string, durataMs: number): void {
+    this.suoniPronti.set(suonoId, durataMs)
   }
 
   private nuovoId(prefisso: string): string {
@@ -399,20 +443,46 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
     path.join(cartellaDati, 'suoni'),
     path.join(cartellaDati, 'cache'),
   )
-  const esitoSuoni = await libreria.preparaTutti(progetto.suoni, progetto.audio)
 
-  const motore = new MotoreRegia(progetto, archivio, libreria)
+  // Il motore si crea prima del thread audio, e il thread audio ha bisogno di
+  // parlargli: si risolve con un rimando, non con un ordine di costruzione
+  // acrobatico.
+  let motore: MotoreRegia | null = null
+  const audio = new MotoreAudio({
+    suDiario: (livello, testo) => motore?.diario(livello, testo),
+  })
+  await audio.aspettaPronto()
+
+  motore = new MotoreRegia(progetto, archivio, libreria, audio)
+
+  // I Suoni si decodificano qui e si caricano LA'. Il thread principale non
+  // tiene in memoria un solo campione: legge il thread audio, dal file.
+  const esitoSuoni = await libreria.assicuraTutti(progetto.suoni, progetto.audio)
   for (const errore of esitoSuoni.errori) motore.diario('attenzione', errore.message)
+  await Promise.all(
+    esitoSuoni.pronti.map(async ({ suono, percorso, durataMs }) => {
+      suono.durataMs = durataMs
+      try {
+        await audio.caricaSuono(suono.id, percorso)
+        motore?.segnaSuonoPronto(suono.id, durataMs)
+      } catch (e) {
+        motore?.diario('attenzione', `Suono "${suono.nome}" non caricato: ${(e as Error).message}`)
+      }
+    }),
+  )
+
+  // Il Flusso parte subito, anche se snapserver non c'e ancora: gli scrittori
+  // riprovano finche non lo trovano, e il §4.3 vuole che quando c'e non ci sia
+  // mai un istante di silenzio non prodotto da noi.
+  audio.avvia()
 
   // Il Sottofondo di ogni Zona riparte da solo: il §3.9 chiede che riaprendo
   // l'app tutto torni com'era, e per una Zona "com'era" include cosa sta suonando.
   for (const z of progetto.zone) {
     if (!z.sottofondoId) continue
-    try {
-      await motore.esegui({ tipo: 'zona.sottofondo', zonaId: z.id, suonoId: z.sottofondoId })
-    } catch (e) {
-      motore.diario('attenzione', `Sottofondo della Zona "${z.nome}": ${(e as Error).message}`)
-    }
+    const suono = progetto.suoni.find((x) => x.id === z.sottofondoId)
+    if (!suono) continue
+    audio.sottofondo(z.id, suono.id, suono.guadagno)
   }
 
   const servitore = new Servitore(motore, { ...OPZIONI_PREDEFINITE, ...opzioni.servitore })
@@ -424,6 +494,9 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
     indirizzo: `http://127.0.0.1:${porta}/`,
     async ferma() {
       await servitore.ferma()
+      // Prima l'audio, poi il progetto: chiudere le socket in modo ordinato
+      // richiede un attimo, e il salvataggio non ha fretta.
+      await audio.chiudi()
       await archivio.chiudi()
     },
   }

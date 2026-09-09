@@ -13,12 +13,13 @@
     "dev:ui": "vite --config src/ui/vite.config.ts",
     "build:ui": "vite build --config src/ui/vite.config.ts",
     "typecheck": "tsc -p tsconfig.engine.json --noEmit && tsc -p tsconfig.shell.json --noEmit",
-    "test": "node --import tsx --test \"src/**/*.test.ts\"",
+    "test": "node --import tsx --test --test-concurrency=1 --test-timeout=30000 \"src/**/*.test.ts\"",
     "build:shell": "tsc -p tsconfig.shell.json",
     "banco:conf": "tsx banco/genera-conf.ts",
     "banco:riconcilia": "tsx banco/riconcilia-dal-vero.ts",
     "banco:prepara": "tsx banco/prepara.ts",
-    "banco:scrivi": "tsx banco/scrivi-dal-vero.ts"
+    "banco:scrivi": "tsx banco/scrivi-dal-vero.ts",
+    "banco:carico": "tsx banco/carico-dal-vero.ts"
   },
   "dependencies": {
     "ws": "^8.18.0",

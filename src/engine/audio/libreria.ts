@@ -73,8 +73,59 @@ export class LibreriaSuoni {
   }
 
   /**
-   * Garantisce che un Suono sia decodificato e caricato in memoria.
-   * Idempotente: chiamarla due volte non riconverte niente.
+   * Garantisce che il `.pcm` esista, e ne restituisce il percorso -- **senza
+   * caricarlo in memoria**.
+   *
+   * E la strada normale: i campioni li legge il thread audio, direttamente da
+   * qui. Un Sottofondo da tre minuti sono 31 MB, e il thread principale non ha
+   * nessuna ragione di tenerseli.
+   */
+  async assicura(
+    suono: Suono,
+    audio: ImpostazioniAudio,
+  ): Promise<{ percorso: string; durataMs: number; convertito: boolean }> {
+    const sorgente = path.join(this.cartellaSuoni, suono.file)
+    const chiave = await this.chiaveCache(sorgente, audio)
+    const percorso = path.join(this.cartellaCache, `${chiave}.pcm`)
+
+    let byte = await this.misuraSeEsiste(percorso)
+    let convertito = false
+    if (byte === null) {
+      await fs.mkdir(this.cartellaCache, { recursive: true })
+      byte = (await this.decodifica(sorgente, audio, percorso)).byteLength
+      convertito = true
+    }
+
+    const bytePerSecondo = audio.frequenza * audio.canali * BYTE_PER_CAMPIONE
+    return { percorso, durataMs: Math.round((byte / bytePerSecondo) * 1000), convertito }
+  }
+
+  /** Come `assicura`, per tutta la libreria. Un file rotto non ferma gli altri. */
+  async assicuraTutti(
+    suoni: readonly Suono[],
+    audio: ImpostazioniAudio,
+  ): Promise<{
+    pronti: Array<{ suono: Suono; percorso: string; durataMs: number }>
+    errori: ErroreDecodifica[]
+  }> {
+    const pronti: Array<{ suono: Suono; percorso: string; durataMs: number }> = []
+    const errori: ErroreDecodifica[] = []
+    for (const suono of suoni) {
+      try {
+        const { percorso, durataMs } = await this.assicura(suono, audio)
+        pronti.push({ suono, percorso, durataMs })
+      } catch (e) {
+        errori.push(e instanceof ErroreDecodifica ? e : new ErroreDecodifica(suono.file, String(e)))
+      }
+    }
+    return { pronti, errori }
+  }
+
+  /**
+   * Come `assicura`, ma carica anche i campioni in memoria qui.
+   *
+   * Serve a chi deve davvero avere il PCM nel thread principale: l'anteprima
+   * dalle cuffie del PC (§3.4), e i test. Il percorso normale e `assicura`.
    */
   async prepara(suono: Suono, audio: ImpostazioniAudio): Promise<EsitoPreparazione> {
     const sorgente = path.join(this.cartellaSuoni, suono.file)
@@ -142,6 +193,16 @@ export class LibreriaSuoni {
   private async leggiSeEsiste(p: string): Promise<Buffer | null> {
     try {
       return await fs.readFile(p)
+    } catch {
+      return null
+    }
+  }
+
+  /** Byte del file in cache, o `null` se non c'e. Non lo legge. */
+  private async misuraSeEsiste(p: string): Promise<number | null> {
+    try {
+      const s = await fs.stat(p)
+      return s.size > 0 ? s.size : null
     } catch {
       return null
     }

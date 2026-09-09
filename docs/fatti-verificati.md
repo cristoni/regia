@@ -213,10 +213,18 @@ Quattro Zone, quattro sorgenti TCP, quattro Altoparlanti finti, `buffer = 2000`:
 - **[misurato]** Sweep dell'anticipo a 50 / 100 / 200 / 400 / 1000 ms, venti secondi ciascuno:
   **nessuna risincronizzazione e nessun chunk perso, a nessun valore**. I client non si sono mai
   accorti di niente.
-- **[misurato]** Restano pero i riallineamenti **nostri**: lo scrittore ogni tanto resta indietro
-  di oltre mezzo secondo e rinuncia a un pezzo di Flusso. Con quattro scrittori, otto client e un
-  server sulla stessa macchina, sul thread principale di Node. **E la prova sperimentale che il
-  mixer va spostato in un `worker_thread`**, come l'ADR 0004 gia prescriveva.
+- **[misurato]** Restavano pero i riallineamenti **nostri**: lo scrittore ogni tanto restava
+  indietro di oltre mezzo secondo e rinunciava a un pezzo di Flusso. Con quattro scrittori, otto
+  client e un server sulla stessa macchina, sul thread principale di Node.
+  → **Risolto spostando mixer e scrittori in un `worker_thread`** (ADR 0004). Prova: bloccando il
+  thread principale **per 28,4 secondi su 40**, con blocchi singoli fino a 119 ms, i quattro
+  Flussi hanno perso **0 ms** e sono rimasti tutti ~210 ms avanti all'orologio, senza una caduta.
+  Si riproduce con `npx tsx banco/carico-dal-vero.ts 40`.
+- **[misurato]** `worker.unref()` sul thread audio **rompe l'avvio**: un worker scollegato dal
+  ciclo di eventi non lo tiene vivo, quindi mentre il thread principale aspetta la prima risposta
+  del thread audio Node considera il processo senza lavoro e chiude, lasciando l'attesa appesa per
+  sempre (`Detected unsettled top-level await`). Il thread audio deve tenere viva Regia: finche il
+  Flusso scorre, l'app c'e.
 - **[misurato]** Su Windows la risoluzione dei timer e 15,6 ms: `setTimeout(20)` dorme ~31 ms.
   Svegliandosi a ogni blocco si perdono ~11 ms per giro, e in dodici secondi si accumulano 6,5
   secondi di riallineamento con scarto **negativo**. Ci si sveglia ogni mezzo anticipo e si

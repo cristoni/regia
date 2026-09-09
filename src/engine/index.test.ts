@@ -73,12 +73,20 @@ class Operatore {
     return e.stato
   }
 
-  private async aspetta<T extends Evento>(prova: (e: Evento) => e is T, entro = 3000): Promise<T> {
+  private async aspetta<T extends Evento>(prova: (e: Evento) => e is T, entro = 5000): Promise<T> {
     const scadenza = Date.now() + entro
     for (;;) {
       for (let i = this.eventi.length - 1; i >= 0; i--) {
         const e = this.eventi[i]!
-        if (prova(e)) return e
+        // Il predicato puo esplodere su un evento che non lo riguarda -- per
+        // esempio la prima istantanea, dove non esiste ancora nessuna Zona.
+        // Un predicato che non si applica significa "non e questo", non "il
+        // test e fallito".
+        try {
+          if (prova(e)) return e
+        } catch {
+          continue
+        }
       }
       if (Date.now() > scadenza) throw new Error('evento mai arrivato')
       await new Promise((r) => setTimeout(r, 5))
@@ -159,7 +167,7 @@ describe('motore: pilotabile senza interfaccia', () => {
       tipo: 'zona.suona', zone: [ingresso], suonoId: conSuono.suoni[0]!.id, esclusivo: false,
     })
 
-    const suonando = await op.stato((x) => x.zone[0]!.effettiInCorso.length > 0)
+    const suonando = await op.stato((x) => (x.zone[0]?.effettiInCorso.length ?? 0) > 0)
     assert.equal(suonando.zone[0]!.effettiInCorso.length, 1, 'deve suonare nell Ingresso')
     assert.equal(suonando.zone[1]!.effettiInCorso.length, 0, 'e SOLO nell Ingresso')
   })
@@ -182,7 +190,7 @@ describe('motore: pilotabile senza interfaccia', () => {
         tipo: 'zona.suona', zone: [s.zone[0]!.id], suonoId: s.suoni[0]!.id, esclusivo: true,
       })
     }
-    const finale = await op.stato()
+    const finale = await op.stato((x) => (x.zone[0]?.effettiInCorso.length ?? 0) > 0)
     assert.equal(finale.zone[0]!.effettiInCorso.length, 1, 'con esclusivo deve restarne uno solo')
   })
 
@@ -234,7 +242,9 @@ describe('motore: ripartenza', () => {
     const secondo = await avviaMotore({ cartellaDati: cartella, servitore: { porta: 0 } })
     daPulire.push(() => secondo.ferma())
     const op2 = await Operatore.collega(secondo.indirizzo)
-    const dopo = await op2.stato((x) => x.zone.length === 1)
+    // Il Sottofondo lo fa ripartire il thread audio: si aspetta che l abbia
+    // preso in carico, non si legge la prima istantanea che passa.
+    const dopo = await op2.stato((x) => x.zone[0]?.sottofondoId != null)
 
     assert.equal(dopo.zone[0]!.nome, 'Cripta')
     assert.equal(dopo.zone[0]!.volume, 0.4, 'il volume di Zona non e stato ripreso')
