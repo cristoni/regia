@@ -523,10 +523,20 @@ portabile e un installer NSIS, **111 MB** l'uno.
   stringhe diverse sono la prova che `radiciCandidate()` trova
   `<resources>/vendor/ffmpeg/ffmpeg.exe` prima di arrivare al ripiego -- cioè che lo shim
   Chocolatey e il suo ffmpeg orfano non entrano nel pacchetto.
-- **[misurato]** Il portabile avviato da `out/` arriva a `clienti: 1`, `wsl: ok`,
-  `snapserver: 0.35.0`, e tutti e tre gli scrittori `attivo` contro lo snapserver vero nella
-  distro. Il percorso guscio → motore compilato → interfaccia compilata → thread audio → distro
-  regge impacchettato.
+- **[misurato]** Il portabile avviato da `out/` **avvia snapserver da zero e ci suona dentro**.
+  La prima misura non lo dimostrava e stava per essere scritta come se lo facesse: gli
+  scrittori risultavano `attivo`, ma `ps -C snapserver` dava quel processo a **7h31m** di vita
+  -- era quello della sessione `tsx` di prima, sopravvissuto al suo `wsl.exe` grazie a `setsid`.
+  Il pacchetto lo stava soltanto **raggiungendo**.
+  Rifatta dopo un `pkill -f snapserver` nella distro: il portabile parte, `clienti: 1`,
+  `wsl: ok`, e `server: spento` -- che e **giusto**, perche l'accensione e un comando
+  dell'Operatore (`server.avvia`), non una cosa che succede al lancio. Mandato quel comando dal
+  WebSocket come farebbe il pulsante, lo stato passa ad `acceso`, i tre scrittori tornano
+  `attivo`, e nella distro compare un snapserver di **un secondo** di vita. Il percorso guscio →
+  motore compilato → thread audio → `wsl.exe` → conf scritta nella distro → snapserver → socket
+  regge impacchettato, da capo a fondo.
+  → Il tranello si ripresentera: `setsid` fa sopravvivere snapserver a chi l'ha lanciato, quindi
+  **una prova sul server audio non vale niente senza guardare l'eta del processo**.
 - **[sorgente]** ⚠️ **Non è un eseguibile autosufficiente, e non può diventarlo.** Il pacchetto
   contiene tutto ciò che è nostro, ma non WSL2: serve Virtual Machine Platform, la
   virtualizzazione da BIOS e un riavvio (già scritto come conseguenza nell'ADR 0003). E non
