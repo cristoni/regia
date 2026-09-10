@@ -229,6 +229,25 @@ si aggiunge un ADR. Quando si misura qualcosa, si aggiunge una riga ai fatti ver
 Gli heredoc di bash si rompono sui contenuti TypeScript di questo progetto: per scrivere o
 modificare file usa gli strumenti dedicati, o uno script Python su file.
 
+## Agent skills
+
+### Issue tracker
+
+Le issue e i PRD vivono come markdown sotto `.scratch/<feature>/`, **fuori da git**: questo
+repo non ha nessun remote, e `.scratch/` è ignorato. Vedi `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+I cinque ruoli di triage tengono i nomi inglesi di default (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`), scritti in una riga `Status:` in cima al
+file della issue. Vedi `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Contesto singolo: `CONTEXT.md` alla radice e `docs/adr/`. Ma qui le fonti sono **tre** e
+hanno una precedenza — `docs/agents/domain.md` la riassume per chi arriva da fuori e rimanda
+a `## Le tre fonti di documentazione` qui sopra, che resta l'originale.
+
 ## Import da altri agenti
 
 C'è una configurazione Codex in `~/.codex/config.toml`. Se vuoi importarne gli elementi

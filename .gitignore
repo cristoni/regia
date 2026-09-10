@@ -7,5 +7,8 @@ vendor/snapclient/
 *.log
 scratch/
 
+# issue e PRD delle agent skill: note di lavoro locali, non storia del progetto
+.scratch/
+
 # ffmpeg in bundle: 133 MB, si riprende con "npm run ffmpeg:prendi"
 vendor/ffmpeg/
