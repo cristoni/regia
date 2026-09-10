@@ -5,11 +5,15 @@
  *   npx tsx banco/genera-conf.ts Ingresso Cantina Soffitta > snapserver.conf
  *
  * Serve a provare il generatore contro uno snapserver vero senza dover avviare
- * tutta Regia -- ed e anche il modo con cui la configurazione entra nella distro
- * WSL durante gli esperimenti.
+ * tutta Regia -- ed e anche il modo con cui la configurazione entra nella Sede
+ * durante gli esperimenti.
  */
 import { progettoVuoto, type Zona } from '../src/engine/dominio/progetto.ts'
-import { generaConfigurazione } from '../src/engine/snapcast/configurazione.ts'
+import {
+  generaConfigurazione,
+  OPZIONI_CONFIGURAZIONE,
+} from '../src/engine/snapcast/configurazione.ts'
+import { sede } from './sede-banco.ts'
 
 const nomi = process.argv.slice(2)
 if (nomi.length === 0) nomi.push('Ingresso', 'Cantina', 'Soffitta')
@@ -27,7 +31,16 @@ progetto.zone = nomi.map(
   }),
 )
 
-const c = generaConfigurazione(progetto)
+/**
+ * Il `datadir` viene dalla Sede, come fa il supervisore, e non dal default.
+ *
+ * Il default e `/var/lib/snapserver`: dentro la distro va bene perche li si e
+ * root, ma su Linux la Sede e questo PC e Regia gira come l'utente che ha fatto
+ * login, che in `/var/lib` non scrive. Snapserver non partirebbe, e il banco
+ * avrebbe generato una configurazione che Regia non genera mai -- cioe avrebbe
+ * provato un'altra cosa.
+ */
+const c = generaConfigurazione(progetto, { ...OPZIONI_CONFIGURAZIONE, datadir: sede.datadir })
 process.stdout.write(c.testo)
 process.stderr.write(
   `Flussi: ${c.flussi.map((f) => `${f.id}@${f.porta}`).join(', ')}\n` +

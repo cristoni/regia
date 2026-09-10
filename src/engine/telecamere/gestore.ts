@@ -20,7 +20,7 @@
  */
 import type { Progetto, Telecamera } from '../dominio/progetto.js'
 import type { TelecameraViva } from '../api/protocollo.js'
-import { indirizziLocali } from '../ambiente.js'
+import { indirizziLocali, virtuale } from '../ambiente.js'
 import { SpezzatoreAnnexB } from './annexb.js'
 import {
   accendiStreaming,
@@ -240,10 +240,19 @@ export class GestoreTelecamere {
    * Cerca Telecamere sulla rete (§3.3).
    *
    * Si sonda `/info.json` sulla porta 4444 di ogni indirizzo della sottorete,
-   * in parallelo e con timeout corto. La scansione e l'unica strada insieme
-   * all'IP scritto a mano: **mDNS non e un'opzione**, avahi e compilato solo
-   * `if(NOT WIN32 AND NOT ANDROID)` e da WSL il multicast verso la LAN non e
-   * affidabile.
+   * in parallelo e con timeout corto. **La scansione e l'unica strada insieme
+   * all'IP scritto a mano, e lo resta su tutti e due i sistemi.**
+   *
+   * Su Windows perche non c'e scelta: avahi e compilato solo
+   * `if(NOT WIN32 AND NOT ANDROID)` (ADR 0002) e da WSL il multicast verso la
+   * LAN non e affidabile. Su Linux la scelta ci sarebbe -- avahi li e compilato
+   * -- ma Regia scrive comunque `mdns_enabled = false` nella configurazione di
+   * snapserver (`configurazione.ts`), e nel motore non c'e nessun client mDNS:
+   * quella riga riguarda comunque il server audio, non le Telecamere, che
+   * andrebbero cercate con un'altra pubblicazione ancora.
+   *
+   * Quindi il codice qui sotto non ha un ramo in meno da qualche parte: ha
+   * sempre e solo questo.
    */
   async scansiona(
     sottorete: string | null,
@@ -493,14 +502,19 @@ export class GestoreTelecamere {
    *
    * Se una Telecamera c'e gia, la sua sottorete e la risposta migliore: e per
    * definizione quella dove stanno i telefoni. Solo dopo si guarda la rete del
-   * PC, che su questa macchina contiene anche l'interfaccia di WSL.
+   * PC, che ha quasi sempre anche interfacce che non portano da nessuna parte:
+   * quella di WSL e di Hyper-V su Windows, `docker0` e i `veth` dei container
+   * su Linux. Hanno un IP vero e una sottorete tutta loro, e scandirla vuol
+   * dire 254 sonde verso il nulla: la prima interfaccia **non** virtuale e
+   * quella giusta. Il giudizio sta in `virtuale()` in `ambiente.ts` -- una sola
+   * regola, che copre i due sistemi, invece di due elenchi che divergono.
    */
   private sottoreteProbabile(): string | null {
     for (const t of this.opzioni.progetto().telecamere) {
       const p = t.host.split('.')
       if (p.length === 4) return p.slice(0, 3).join('.')
     }
-    const locale = indirizziLocali().find((i) => !/wsl|hyper-v|vethernet|virtual/i.test(i.interfaccia))
+    const locale = indirizziLocali().find((i) => !virtuale(i.interfaccia))
     return locale ? locale.ip.split('.').slice(0, 3).join('.') : null
   }
 }

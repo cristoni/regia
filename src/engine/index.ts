@@ -19,7 +19,6 @@
 import * as os from 'node:os'
 import * as path from 'node:path'
 import * as fs from 'node:fs/promises'
-import { spawn } from 'node:child_process'
 
 import {
   byteBlocco,
@@ -48,6 +47,7 @@ import {
 import { GestoreTelecamere } from './telecamere/gestore.js'
 import { Registratore, type FileRegistrato } from './registrazione/registratore.js'
 import { Ambiente } from './ambiente.js'
+import { apriCartella } from './apri-cartella.js'
 import { vigilaAnello } from './anello.js'
 import { DpapiNonDisponibile, cifra, decifra } from './sicurezza/dpapi.js'
 import { OPZIONI_PREDEFINITE, Servitore, type Motore, type OpzioniServitore } from './api/servitore.js'
@@ -95,11 +95,12 @@ export class MotoreRegia implements Motore {
   /**
    * Dove gli scrittori aprono le socket delle sorgenti.
    *
-   * Parte da `127.0.0.1` perche finche non si sa l'indirizzo della distro e
-   * l'unica cosa che si puo provare, ma **non e l'indirizzo giusto**: in
-   * `networkingMode=NAT` gli inoltri di WSL su `127.0.0.1` sopravvivono al
-   * processo che ascoltava, accettano connessioni e non leggono niente. Appena
-   * il supervisore sa l'indirizzo vero, si riconfigura.
+   * Parte da `127.0.0.1` perche finche non si sa dov'e la Sede e l'unica cosa
+   * che si puo provare. Su Linux e gia la risposta definitiva. Su Windows
+   * **non e l'indirizzo giusto**: in `networkingMode=NAT` gli inoltri di WSL
+   * su `127.0.0.1` sopravvivono al processo che ascoltava, accettano
+   * connessioni e non leggono niente. Appena il supervisore sa l'indirizzo
+   * vero, si riconfigura.
    */
   private hostFlussi = '127.0.0.1'
 
@@ -107,7 +108,19 @@ export class MotoreRegia implements Motore {
   readonly telecamere: GestoreTelecamere
   readonly registratore: Registratore
   readonly ambiente = new Ambiente()
-  private readonly anteprima = new AnteprimaSuoni()
+  /**
+   * L'anteprima riferisce al Diario, e senza questo aggancio sarebbe muta.
+   *
+   * `suona()` risponde quando il suono e **cominciato** -- aspettare la fine
+   * terrebbe in piedi la richiesta per tutta la durata del Suono -- quindi cio
+   * che va storto dopo (il lettore che non parte, che non trova un server
+   * audio, che esce con un errore) arriva troppo tardi per l'esito del comando.
+   * Senza il Diario, l'Operatore preme "ascolta", non sente niente, e non ha
+   * modo di sapere se e rotto il file, la scheda audio o il pulsante.
+   */
+  private readonly anteprima = new AnteprimaSuoni((livello, testo) =>
+    this.diario(livello, testo),
+  )
 
   constructor(
     progetto: Progetto,
@@ -128,10 +141,10 @@ export class MotoreRegia implements Motore {
         this.audio.suona([chiave], SUONO_IDENTIFICA, 1, false)
         return this.durateSegnali.get(SUONO_IDENTIFICA) ?? 600
       },
-      suIndirizzoDistro: (ip) => {
+      suIndirizzoFlussi: (ip) => {
         if (ip === this.hostFlussi) return
         this.hostFlussi = ip
-        this.diario('info', `Le sorgenti audio vanno verso la distro, a ${ip}.`)
+        this.diario('info', `Le sorgenti audio vanno a ${ip}.`)
         this.riconfiguraAudio()
       },
     })
@@ -656,8 +669,9 @@ export class MotoreRegia implements Motore {
       case 'registrazione.apriCartella': {
         const cartella = this.progetto.registrazione.cartella
         await fs.mkdir(cartella, { recursive: true })
-        // `explorer.exe` risponde 1 anche quando riesce: non si guarda l'esito.
-        spawn('explorer.exe', [cartella], { windowsHide: false, detached: true }).unref()
+        // Il comando cambia col sistema e l'errore di avvio va ascoltato, o su
+        // Linux un `xdg-open` che manca diventa un'eccezione non gestita.
+        apriCartella(cartella, (motivo) => this.diario('attenzione', motivo))
         break
       }
 
@@ -678,7 +692,7 @@ export class MotoreRegia implements Motore {
         break
       case 'ambiente.controlla':
         await this.ambiente.controlla(
-          this.progetto.server.distro,
+          this.progetto.server,
           generaConfigurazione(this.progetto).porte,
         )
         break
@@ -845,16 +859,53 @@ export class MotoreRegia implements Motore {
     }
   }
 
+  /**
+   * La password in chiaro di una Telecamera, decifrandola una volta sola.
+   *
+   * ⚠️ **Anche il fallimento si ricorda, e questa e la parte che conta.** Questa
+   * funzione non sta in un posto tranquillo: `GestoreTelecamere` interroga tutte
+   * le Telecamere ogni tre secondi, e ogni giro passa di qui. Ricordando solo i
+   * successi, una password che non si decifra scriveva una riga di Diario per
+   * Telecamera **ogni tre secondi, per sempre** -- con sei Telecamere il Diario
+   * intero (2000 righe) si riscrive in un quarto d'ora, e ci si perde dentro
+   * tutto il resto.
+   *
+   * Non e un caso di scuola: su Linux DPAPI non esiste, quindi `decifra` si
+   * rifiuta *sempre*, e basta aprire su Linux un progetto preparato su Windows.
+   * Il rifiuto e giusto (§6: cifrate con DPAPI o non salvate); dirlo mille volte
+   * no. Si dice una volta per Telecamera, e le volte dopo si tace.
+   *
+   * ⚠️ **La rinuncia e permanente anche su Windows, ed e una scelta.** Li DPAPI
+   * c'e, quindi il fallimento non parla del sistema ma di *quel* segreto: una
+   * password cifrata da un altro utente o su un altro PC non si decifrera mai,
+   * perche `CurrentUser` la lega a chi ha fatto il Setup. Riprovare ogni tre
+   * secondi vorrebbe dire un processo PowerShell da mezzo secondo ogni tre
+   * secondi, per sempre, per una risposta che non cambiera.
+   *
+   * Il prezzo lo paga il caso raro: un PowerShell che va in timeout sotto carico
+   * e recuperabile, e qui viene trattato come definitivo. Non resta bloccato --
+   * riscrivere la password in Impostazioni sovrascrive questa memoria (vedi
+   * `impostaPassword`), e cosi fa un riavvio di Regia -- ma va saputo, ed e il
+   * motivo per cui il messaggio dice all'Operatore cosa fare invece di limitarsi
+   * a constatare.
+   */
   private password(t: Telecamera): string | null {
     const inMemoria = this.passwordInChiaro.get(t.id)
-    if (inMemoria !== undefined) return inMemoria
+    if (inMemoria !== undefined) return inMemoria || null
     if (!t.passwordCifrata) return null
     try {
       const chiara = decifra(t.passwordCifrata)
       this.passwordInChiaro.set(t.id, chiara)
       return chiara
-    } catch {
-      this.diario('attenzione', `Non riesco a decifrare la password di "${t.nome}".`)
+    } catch (e) {
+      // La stringa vuota e la memoria del fallimento: al giro dopo esce dal
+      // `inMemoria` qui sopra come `null`, senza riprovare e senza ridirlo.
+      this.passwordInChiaro.set(t.id, '')
+      this.diario(
+        'attenzione',
+        `Non riesco a decifrare la password di "${t.nome}": ${(e as Error).message} ` +
+          'Riscrivila in Impostazioni se la Telecamera la richiede.',
+      )
       return null
     }
   }
@@ -1055,18 +1106,18 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
   // Il server audio: prima si prova ad **adottarne** uno gia acceso. Con
   // `setsid` sopravvive alla chiusura di Regia, e riavviarlo per abitudine
   // sarebbe due secondi di silenzio che nessuno ha chiesto.
-  // L'indirizzo della distro si cerca **prima** di qualunque altra cosa: e
-  // dove gli scrittori devono aprire le socket, e partire su `127.0.0.1` per
-  // qualche secondo significa aprirle su un inoltro di WSL che non legge.
+  // L'indirizzo dei Flussi si cerca **prima** di qualunque altra cosa: e dove
+  // gli scrittori devono aprire le socket, e su Windows partire da `127.0.0.1`
+  // per qualche secondo significa aprirle su un inoltro di WSL che non legge.
   void motore.server
-    .aggiornaIndirizzoDistro()
+    .aggiornaIndirizzoFlussi()
     .catch(() => null)
     .then(() => motore?.server.adotta())
     .then((trovato) => {
       if (trovato) motore?.diario('info', 'Trovato un server audio gia acceso: adottato.')
     })
   void motore.ambiente
-    .controlla(progetto.server.distro, generaConfigurazione(progetto).porte)
+    .controlla(progetto.server, generaConfigurazione(progetto).porte)
     .catch(() => {})
 
   const servitore = new Servitore(motore, {

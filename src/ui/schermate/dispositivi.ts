@@ -27,6 +27,17 @@ export class Dispositivi implements Schermata {
   private readonly tabellaAudio: HTMLElement
   private readonly tabellaVideo: HTMLElement
   private readonly scansione: HTMLButtonElement
+  /**
+   * La nota sotto il campo della password, che dice due cose diverse sui due
+   * sistemi (e quindi si scrive in `aggiorna`, non nel costruttore).
+   *
+   * Non e pignoleria: e l'unica riga che l'Operatore legge **mentre** scrive
+   * una password. Su Windows promette che finisce cifrata; fuori da Windows
+   * quella promessa sarebbe falsa -- DPAPI non c'e e non ha equivalenti, quindi
+   * la password non viene salvata affatto -- e una promessa di sicurezza falsa
+   * detta nel punto in cui conta e peggio del silenzio.
+   */
+  private readonly notaPassword = el('p', { class: 'nota' })
   private ultimo: Stato | null = null
 
   constructor(private readonly ctx: Contesto) {
@@ -124,6 +135,30 @@ export class Dispositivi implements Schermata {
     testo(
       this.vuotoVideo,
       'Nessuna Telecamera. Cercale sulla rete, o aggiungine una scrivendo il suo indirizzo.',
+    )
+
+    // Il discrimine e Windows, non Linux: DPAPI e di Windows, quindi ovunque
+    // altro -- Linux, macOS, qualunque cosa arrivi come 'altro' -- vale la
+    // seconda frase. E per la stessa ragione il mDNS: avahi non compilato e un
+    // fatto di Windows (ADR 0002); altrove ci sarebbe, e resta spento perche lo
+    // abbiamo deciso noi.
+    const suWindows = stato.ambiente.piattaforma === 'windows'
+    testo(
+      this.notaPassword,
+      (suWindows
+        ? 'La password viene cifrata con DPAPI e non esce mai dal PC: non finisce nemmeno nel ' +
+          'file esportato. '
+        : 'La password non viene salvata: DPAPI e di Windows e non ha un equivalente qui, quindi ' +
+          'resta solo in memoria e la Telecamera funziona finche Regia resta aperta. Al prossimo ' +
+          'avvio va riscritta. ') +
+        // Sul rilevamento automatico non c'e niente da distinguere fra i due
+        // sistemi, e la ragione non e quella del server audio: `mdns_enabled =
+        // false` riguarda snapserver, mentre una Telecamera andrebbe cercata
+        // con un'altra pubblicazione ancora, che nel motore non c'e. Scriverlo
+        // come una conseguenza di avahi -- vero solo su Windows -- faceva
+        // credere che altrove esistesse un interruttore da accendere.
+        'Non c\'e nessun rilevamento automatico delle Telecamere, su nessun sistema: ' +
+        'l\'indirizzo scritto a mano o la scansione della sottorete sono le uniche due strade.',
     )
   }
 
@@ -345,14 +380,7 @@ export class Dispositivi implements Schermata {
         el('label', { class: 'campo' }, 'HTTPS', el('div', { class: 'fila' }, conHttps, 'certificato autofirmato accettato')),
         el('label', { class: 'campo' }, ' ', aggiungi),
       ),
-      el('p', {
-        class: 'nota',
-        testo:
-          'La password viene cifrata con DPAPI e non esce mai dal PC: non finisce nemmeno nel ' +
-          'file esportato. Il rilevamento automatico via mDNS non e una strada praticabile — ' +
-          'avahi non e compilato su Windows — quindi l\'indirizzo scritto a mano o la scansione ' +
-          'sono le uniche due.',
-      }),
+      this.notaPassword,
     )
   }
 }

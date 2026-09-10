@@ -19,8 +19,12 @@ import type { Stato, SuonoVivo, TelecameraViva, ZonaViva } from '../../engine/ap
  * niente da dire: un singolo intoppo -- un garbage collector, un disco che si
  * ferma -- si spalma sulla finestra di trenta secondi e non arriva qui. Quel
  * che deve accendersi e la condizione **cronica**, che e l'unica che si sente:
- * a 25 ms al secondo (il caso misurato, orologio della distro storto) i client
- * tagliano una quarantina di volte al secondo.
+ * a 25 ms al secondo i client tagliano una quarantina di volte al secondo.
+ *
+ * Quel 25 e una misura, non una stima, ma e una misura fatta in **un** caso --
+ * l'orologio della distro WSL andato storto dopo una sospensione del PC. La
+ * soglia vale ovunque; l'aneddoto no: una Sede locale su Linux non ha quel
+ * meccanismo, e li un ritardo cronico avra un'altra causa da cercare.
  */
 export const SOGLIA_RITARDO_MS_AL_SECONDO = 5
 
@@ -223,6 +227,134 @@ export function salute(stato: Stato): Salute {
       `${stato.altoparlanti.filter((a) => a.collegato).length}/${stato.altoparlanti.length} Altoparlanti, ` +
       `${stato.telecamere.filter((t) => t.raggiungibile).length}/${stato.telecamere.length} Telecamere.`,
   }
+}
+
+/**
+ * Le righe del primo passo del Setup: com'e messa questa macchina (§3.8).
+ *
+ * Sta qui e non nella schermata perche e la derivazione piu ramificata che
+ * l'interfaccia abbia -- piattaforma per Sede per snapserver per versione -- ed
+ * e anche quella in cui una riga sbagliata si paga peggio: chi la legge sta
+ * decidendo cosa installare, e una frase falsa lo manda a installare la cosa
+ * sbagliata. La schermata la stampa e basta.
+ *
+ * `piattaforma` viene dal motore e non da `navigator`: con `--rete`
+ * l'interfaccia vera gira via HTTP, e il tablet della Fase 3 e un secondo
+ * client che puo essere qualunque cosa mentre il motore e su Linux. Dedurre il
+ * sistema dal proprio ambiente darebbe la risposta giusta solo per caso.
+ */
+export function righeAmbiente(stato: Stato): Salute[] {
+  const a = stato.ambiente
+
+  // Prima del primo controllo l'istantanea e ancora quella vuota: ffmpeg
+  // `null`, nessuna porta, nessun indirizzo. Stamparne le righe direbbe
+  // "ffmpeg non trovato" di una macchina che non e stata ancora guardata.
+  if (a.sede === 'sconosciuta') {
+    return [{ livello: 'info', testo: 'L\'ambiente non e ancora stato controllato.' }]
+  }
+
+  const righe: Salute[] = []
+
+  if (a.sede === 'assente') {
+    const motivo = a.sedeMotivo ?? `${a.sedeDescrizione} non e utilizzabile`
+    // ⚠️ **Il rimedio arriva dal motore, e non si indovina qui.** Su Windows i
+    // casi sono due e si somigliano soltanto da fuori: "WSL non c'e" si rimedia
+    // con `wsl --install`, Virtual Machine Platform e un riavvio; "WSL c'e ma
+    // non quella distro" -- che e il primo avvio piu comune -- si rimedia con
+    // un menu a tendina in Impostazioni. Dedurlo dal testo del motivo voleva
+    // dire dare il primo consiglio anche al secondo, cioe far riavviare il PC
+    // per niente. Chi ha fatto la diagnosi sa qual e il rimedio, e lo manda.
+    righe.push({
+      livello: 'grave',
+      testo: a.sedeRimedio ? `${motivo}. ${a.sedeRimedio}` : `${motivo}.`,
+    })
+  } else {
+    righe.push({ livello: 'info', testo: `La Sede del server audio c'e: ${a.sedeDescrizione}.` })
+  }
+
+  // Dentro una Sede che non c'e non si e guardato: dire "snapserver non
+  // trovato" sarebbe un secondo allarme per lo stesso guasto, e per giunta uno
+  // che nessuno ha verificato.
+  if (a.sede === 'ok') righe.push(rigaSnapserver(a))
+
+  righe.push(
+    a.ffmpeg
+      ? { livello: a.ffmpeg.includes('PATH') ? 'attenzione' : 'info', testo: `ffmpeg: ${a.ffmpeg}` }
+      : { livello: 'attenzione', testo: 'ffmpeg non trovato: la registrazione non funzionera.' },
+  )
+
+  if (a.porteOccupate.length > 0) {
+    // Dove la Sede e locale il nostro stesso snapserver tiene le porte, e da
+    // qui si vedono: a server acceso e la condizione normale, non un allarme.
+    // Su Windows snapserver ascolta dentro la distro, ma il ponte di Regia
+    // (ADR 0010) tiene le stesse porte da questa parte, quindi vale uguale.
+    const nostre = stato.server === 'acceso'
+    righe.push({
+      livello: nostre ? 'info' : 'attenzione',
+      testo:
+        `Porte gia occupate: ${a.porteOccupate.join(', ')}. ` +
+        (nostre
+          ? 'Il server audio e acceso: sono quasi certamente le sue. Non c\'e niente da fare.'
+          : 'Se e il server audio di una sessione precedente va bene; altrimenti qualcosa le sta usando.'),
+    })
+  }
+
+  if (a.indirizzi.length > 0 && a.indirizzi.every((i) => i.senzaFili)) {
+    righe.push({
+      livello: 'attenzione',
+      testo:
+        'Il PC e collegato solo via Wi-Fi. Otto Altoparlanti in PCM stereo sono 11,3 Mbit/s ' +
+        'continui, piu il video: collega il PC via cavo e tieni i telefoni sul 5 GHz.',
+    })
+  }
+  return righe
+}
+
+/**
+ * Snapserver: c'e, non c'e, o c'e ma non capisce il file che sappiamo scrivere.
+ *
+ * Il terzo caso e l'unico che non si vede da solo, ed e quello che il Setup
+ * esiste per prendere: dalla 0.33 la sezione `[tcp]` si chiama `[tcp-control]`.
+ * Una versione precedente legge la nostra configurazione, ignora in silenzio
+ * meta delle sezioni, parte lo stesso e ascolta sulle porte sue -- nessun
+ * errore nel log, e i telefoni che non si collegano si scoprono a meta serata.
+ */
+function rigaSnapserver(a: Stato['ambiente']): Salute {
+  if (a.snapserver === null) {
+    return {
+      livello: 'grave',
+      testo:
+        `Snapserver non si trova dove deve girare (${a.sedeDescrizione}): senza, nessun ` +
+        'telefono puo suonare. Se e installato altrove, indica il binario nella variabile ' +
+        'd\'ambiente REGIA_SNAPSERVER.',
+    }
+  }
+  if (a.snapserverVecchio) {
+    return {
+      livello: 'grave',
+      testo:
+        `Snapserver ${a.snapserver} (${a.sedeDescrizione}) e troppo vecchio: dalla 0.33 la ` +
+        'sezione [tcp] si chiama [tcp-control]. Una versione precedente legge la nostra ' +
+        'configurazione, ne ignora meta in silenzio, parte lo stesso e ascolta sulle porte ' +
+        'sbagliate: nessun errore nel log, e la serata si rompe piu tardi. E la 0.27.0 che ' +
+        'da l\'apt di Ubuntu 24.04: serve la 0.35, oppure indica un altro binario in ' +
+        'REGIA_SNAPSERVER.',
+    }
+  }
+  // La ricerca riporta il binario anche quando `-v` non dice una versione, e
+  // `snapserverVecchio` in quel caso resta falso -- non si blocca su un
+  // sospetto. Non sapere che numero e pero non e sapere che va bene: una 0.27
+  // muta finirebbe esattamente qui, e passerebbe per buona senza questa riga.
+  if (!/^\d/.test(a.snapserver)) {
+    return {
+      livello: 'attenzione',
+      testo:
+        `Snapserver c'e (${a.sedeDescrizione}) ma non dice la propria versione: non si puo ` +
+        'escludere che sia precedente alla 0.33, che leggerebbe meta configurazione ' +
+        'ignorando l\'altra meta senza dirlo.',
+    }
+  }
+  return { livello: 'info', testo: `Snapserver ${a.snapserver} trovato (${a.sedeDescrizione}).` }
 }
 
 /**

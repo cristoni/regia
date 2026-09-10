@@ -78,3 +78,72 @@ Cade con essa anche la strada 1: **Regia non scrive `.wslconfig`** e non tocca n
 configurazione condivisa del PC. La promessa "nessun contatto con le distro gia presenti" torna
 quindi vera — resta vero, pero, che la distro va scelta in Impostazioni, perche quella predefinita
 di questo ADR (`Regia-Snapserver`) non esiste su una macchina qualsiasi.
+
+---
+
+## Correzione, 10 settembre 2026
+
+**Su Linux questo ADR non si applica**, e non in parte: per intero.
+
+Non c'è nessuna distro, perché snapserver gira sulla macchina stessa
+([ADR 0011](0011-dove-gira-snapserver-e-una-sede-non-un-if.md)). Quindi niente rootfs Debian da
+mettere nell'installer, niente `wsl --import`, niente `wsl --unregister` da spiegare a chi
+disinstalla, niente ~100–150 MB, e niente `.wslconfig` da non toccare. La prima riga di questo
+ADR — «dato che snapserver non gira nativo su Windows **e che il target è solo Windows**» — è
+esattamente la premessa che è venuta meno: la conclusione resta valida sotto quella premessa, e
+fuori non ha niente da dire.
+
+### Cade anche la conseguenza più pesante
+
+La prima delle Conseguenze qui sopra è la frase che ha fatto più danno al documento di progetto:
+«il §8.1 non è raggiungibile», perché WSL richiede Virtual Machine Platform, la virtualizzazione
+abilitata da BIOS e un riavvio, e su un PC mai visto non esiste un percorso «15 minuti, nessun
+terminale».
+
+**Su Linux quell'ostacolo non c'è.** Snapserver è un pacchetto: si installa senza riavviare,
+senza toccare il BIOS e senza abilitare niente nell'hypervisor. Il costo passa da «un riavvio e
+una visita nel BIOS» a «un pacchetto da mettere».
+
+Il §8.1 però **non diventa automaticamente raggiungibile**, e sarebbe comodo dirlo e sbagliato:
+quel criterio chiede anche «nessun terminale», e `sudo apt install snapserver` è un terminale.
+Un `.deb` di Regia che dichiarasse snapserver fra le dipendenze lo soddisferebbe — ma **quel
+`.deb` non si spedisce**: non è fra i bersagli, e il commento in `electron-builder.yml` spiega
+perché. Anche esistendo, la dipendenza sarebbe una trappola invece di una comodità, perché
+tirerebbe dentro proprio la versione che Regia rifiuta su ogni Ubuntu fino alla 25.10; il
+pacchetto giusto non c'è. Il passo manuale resta, quindi, ed è un passo cosciente.
+
+E c'è una trappola nuova, che questo ADR aveva già visto senza sapere dove sarebbe andata a
+parare. Qui sopra si dice che l'apt di Ubuntu 24.04 dà la **0.27.0** e che coprire due formati
+di configurazione è tassa pura. Su Windows la questione era teorica, perché la versione se la
+sceglieva Regia. Su Linux non lo è: **`apt install snapserver` su Ubuntu 24.04 produce un
+server che Regia rifiuta di avviare**, perché sotto la 0.33 la sezione `[tcp]` non si chiamava
+ancora `[tcp-control]`. Il cancello di versione e il perché stanno nell'ADR 0011. Chi scriverà
+le istruzioni di installazione per Linux deve saperlo prima, non dopo.
+
+### L'obbligo GPL-3.0 resta, ma oggi non è innescato
+
+La seconda Conseguenza — «distribuiamo un binario di snapserver dentro il nostro installer,
+quindi il `.deb` va incluso non modificato, con la sua licenza e l'offerta scritta dei
+sorgenti» — **vale ancora, e vale per qualunque piattaforma**: è una proprietà di cosa si
+spedisce, non di che sistema operativo lo riceve.
+
+Oggi però non si spedisce, e non per distrazione. `electron-builder.yml` ha due bersagli
+Linux — AppImage e `tar.gz` — e **nessuno dei due contiene snapserver**: `extraResources`
+porta soltanto `vendor/ffmpeg`, che è una build LGPL con la sua licenza accanto. Nessuno dei due
+formati sa dichiarare dipendenze, e il `.deb`, che saprebbe, non è fra i bersagli. Su Windows vale lo
+stesso: il binario va messo nella distro (`banco/prepara.ts` lo fa a mano per il collaudo).
+
+Finché è così, snapserver resta un programma di sistema che Regia **esegue**, non un componente
+che Regia **distribuisce**, e l'obbligo non è cancellato — è non innescato, e per una scelta
+documentata invece che per un'omissione. È una differenza che conta il giorno in cui qualcuno
+riapre la questione: c'è un posto dove è scritto perché.
+
+Si riattacca **il giorno in cui uno di quei pacchetti si porta dentro il binario**, che è la
+strada più ovvia per togliere di mezzo il passo manuale del paragrafo precedente. Le due cose
+sono legate, ed è bene deciderle insieme: la comodità dell'installazione si paga in obblighi di
+licenza. Questa correzione non la decide.
+
+Resta invece intatta l'ultima sezione, quella sull'alternativa scartata: **implementare il
+server Snapcast dentro Regia** non diventa più attraente perché è comparsa una piattaforma dove
+snapserver gira nativo. Al contrario — una delle ragioni per farlo era avere un solo `.exe`, e
+su Linux quel problema non esiste nemmeno.

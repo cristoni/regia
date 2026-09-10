@@ -10,6 +10,13 @@
  *
  * Presuppone uno snapserver acceso con le Zone Ingresso / Cantina / Soffitta e
  * qualche `snapclient` collegato. Vedi `docs/fatti-verificati.md`.
+ *
+ * E l'unico script del banco che non tocca la Sede: parla solo la porta di
+ * controllo, e la parla come la parla il motore -- `127.0.0.1:1705`, il default
+ * di `OPZIONI_RPC`. Non passa dalla Sede apposta: se il banco raggiungesse
+ * snapserver per una strada diversa da quella di Regia, proverebbe un'altra
+ * cosa. Per accendere il server, le istruzioni giuste per il tuo sistema le
+ * stampa `npx tsx banco/prepara.ts`.
  */
 import { progettoVuoto, type Altoparlante, type Zona } from '../src/engine/dominio/progetto.ts'
 import { ClientRpc } from '../src/engine/snapcast/rpc.ts'

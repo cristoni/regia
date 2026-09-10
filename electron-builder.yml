@@ -1,11 +1,26 @@
-# Come Regia diventa un .exe.
+# Come Regia diventa un pacchetto: un `.exe` su Windows, un AppImage o un
+# `tar.gz` su Linux. Il `.deb` non c'è, e non finché non ci sono i metadati che
+# fpm pretende: il perché, e come riattivarlo, stanno più sotto accanto
+# all'elenco dei bersagli Linux. Non c'è nemmeno uno `npm run dist:deb`, apposta:
+# in questo repo non potrebbe arrivare in fondo, e uno script che non funziona
+# vale meno di una riga di istruzioni che funziona.
 #
-# ⚠️ **Questo non è un eseguibile autosufficiente, e non può esserlo.** Contiene
-# tutto ciò che è nostro -- guscio, motore, interfaccia, ffmpeg -- ma il server
-# audio gira dentro WSL2 (ADR 0002: `BUILD_SERVER` è definito solo `if(NOT
-# WIN32)`), e WSL2 vuole Virtual Machine Platform, la virtualizzazione da BIOS e
-# un riavvio. Un installer li può verificare e chiedere; non li può contenere.
-# La distro con snapserver dentro, prevista dall'ADR 0003, non c'è ancora qui.
+# ⚠️ **Nessuno dei due pacchetti è autosufficiente.** Tutti e due contengono
+# tutto ciò che è nostro -- guscio, motore, interfaccia, ffmpeg -- e in nessuno
+# dei due c'è snapserver. Ma per due ragioni diverse, e conviene tenerle
+# distinte, perché portano a due frasi diverse da dire all'Operatore.
+#
+# Su **Windows** non *può* esserlo. Snapserver non gira nativo (ADR 0002:
+# `BUILD_SERVER` è definito solo `if(NOT WIN32)`), quindi la Sede è una distro
+# WSL2 -- e WSL2 vuole Virtual Machine Platform, la virtualizzazione da BIOS e un
+# riavvio. Un installer li può verificare e chiedere; non li può contenere. La
+# distro con snapserver dentro, prevista dall'ADR 0003, non c'è ancora qui.
+#
+# Su **Linux** quella frase non vale più: snapserver gira nativo, la Sede è
+# questo PC, e non c'è niente da abilitare né da riavviare. Qui non esserlo è una
+# scelta, non un limite: snapserver lo installa il sistema, e Regia parte lo
+# stesso con il server audio `spento` finché non c'è. Più sotto, dove si decide
+# di non dichiararlo nemmeno come dipendenza del `.deb`, c'è scritto perché.
 
 appId: it.regia.app
 productName: Regia
@@ -31,6 +46,21 @@ files:
 # La build è **LGPL**, non GPL (§267 del documento di progetto chiede di
 # rispettare gli obblighi, e quelli della LGPL sono i più leggeri): la licenza
 # viaggia accanto al binario, non separata da lui.
+#
+# Sta al primo livello e non dentro `win:`, quindi vale già per tutte le
+# piattaforme e non va ripetuto. Attenzione però alla ragione, perché quella che
+# viene in mente è sbagliata: un `extraResources` dentro `linux:` **non**
+# sostituirebbe questo, ci si sommerebbe. `getFileMatchers()` in
+# `app-builder-lib/out/fileMatcher.js` fa `addPatterns(config[name])` e subito
+# dopo `addPatterns(options.customBuildOptions[name])`, dove `customBuildOptions`
+# sono le opzioni della piattaforma -- `platformPackager.js` gliele passa come
+# `platformSpecificBuildOptions`. Ripeterlo qui sotto vorrebbe dire copiare la
+# stessa cartella due volte nello stesso posto.
+#
+# Il binario dentro `vendor/ffmpeg` è uno solo, quello della macchina che ha
+# eseguito `npm run ffmpeg:prendi`: il pacchetto Linux si costruisce su Linux, e
+# in cima a `strumenti/prendi-ffmpeg.ts` c'è scritto cosa succede a chi se ne
+# dimentica.
 extraResources:
   - from: vendor/ffmpeg
     to: vendor/ffmpeg
@@ -62,3 +92,121 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   shortcutName: Regia
+
+# ⚠️ **Il `.deb` non dichiara una dipendenza da snapserver, e la ragione è
+# l'opposto di quella che verrebbe in mente.** Non è che snapserver non serva:
+# è che la dipendenza installerebbe proprio la versione sbagliata. Su
+# packages.ubuntu.com, letto il 2026-09-10, gli archivi portano snapserver
+# 0.25.0 (22.04), 0.27.0 (24.04 LTS), 0.31.0 (25.10), 0.34.0 (26.04). Il minimo
+# è `0.33.0`, e in cima a `VERSIONE_MINIMA_SNAPSERVER` in `snapcast/sede.ts` c'è
+# scritto cosa fa una più vecchia: ignora in silenzio le sezioni del nostro file
+# che non conosce, parte, e ascolta sulle porte sbagliate coi default suoi. Cioè:
+# ogni Ubuntu fino alla 25.10 compresa tirerebbe dentro uno snapserver che
+# `versioneTroppoVecchia()` rifiuta, e apt direbbe di aver fatto il suo dovere.
+# La 26.04 è la prima in cui la dipendenza avrebbe senso.
+#
+# Meglio allora che l'installazione riesca sempre e sia il Setup a dire quale
+# versione manca -- che è già quello che fa. Chi monta la casa installa
+# `snapserver` con apt solo se la sua distro è abbastanza nuova, altrimenti il
+# `.deb` ufficiale 0.35 di badaix.
+#
+# ⚠️ **E il pacchetto Linux si costruisce su Linux.** Non è una preferenza:
+# electron-builder su Windows non ha con che farlo. `getFpmPath()` in
+# `toolsets/linux.js` là si limita a restituire la stringa `fpm` sperando che sia
+# nel PATH -- le build che scarica esistono solo per linux e darwin -- e gli
+# attrezzi dell'AppImage (`mksquashfs`, `desktop-file-validate`) li cerca sotto
+# `linux-<arch>` o `darwin`. A questa si somma la ragione nostra: `vendor/ffmpeg`
+# contiene il binario della macchina che ha eseguito `npm run ffmpeg:prendi`.
+# Letto nel codice di app-builder-lib installato, non provato lanciando la build.
+linux:
+  target:
+    # L'AppImage è il "portabile" di Linux: un file solo, si copia su una
+    # chiavetta e si lancia. È questo che si intende quando si chiede
+    # "l'eseguibile".
+    - AppImage
+    # ⚠️ Il `tar.gz` non è un doppione dell'AppImage: è il suo ripiego. Un
+    # AppImage di tipo 2 si monta con FUSE 2, e da Ubuntu 22.04 il sistema porta
+    # FUSE 3: finché qualcuno non installa `libfuse2` a mano l'AppImage non parte
+    # e dice solo «AppImages require FUSE to run» (documentazione AppImage; non
+    # misurato qui). Si aggira con `--appimage-extract-and-run`, ma è una cosa da
+    # sapere prima, e davanti a una casa da aprire non la sa nessuno. Il `tar.gz`
+    # si scompatta e si lancia, e non chiede niente al sistema.
+    - tar.gz
+    # ⚠️ **Il `.deb` manca da questo elenco apposta: in questo repo, com'è
+    # adesso, non può venire su.** Il pacchetto vero -- quello che si installa,
+    # compare nel menu e si disinstalla -- resta la cosa giusta per il PC della
+    # casa che sta montato tutta la stagione, ma prima vogliono i metadati qui
+    # sotto. `FpmTarget.build()` chiama `computeFpmMetaInfoOptions()`, che
+    # pretende la homepage: `computePackageUrl()` la cerca nei metadati
+    # dell'applicazione (`homepage` di package.json), poi in `repository`, poi
+    # nell'`origin` letto da `.git/config`, e qui non ce n'è nessuna. Muore con
+    # «Please specify project homepage».
+    #
+    # E muore tardi, non all'avvio: `FpmTarget` ha un `checkOptions()` scritto
+    # apposta per accorgersene prima, ma in electron-builder 26 non lo chiama
+    # nessuno -- cercato `checkOptions` in `app-builder-lib/out`,
+    # `electron-builder/out`, `builder-util/out` e `dmg-builder/out`: ci sono
+    # solo le due definizioni, nessun chiamante. L'errore esce quindi da dentro
+    # `build()`, cioè a impacchettamento fatto. I bersagli girano insieme e
+    # `AsyncTaskManager` mette da parte gli errori (`addTask` fa
+    # `promise.catch(it => this.errors.push(it))`) per rilanciarli solo dopo che
+    # tutti hanno finito: AppImage e `tar.gz` finiscono in `out/` lo stesso, e
+    # poi il comando esce diverso da zero. Un `npm run dist:linux` rosso con
+    # dentro due pacchetti buoni è peggio di uno che non prova.
+    #
+    # Per riattivarlo: prima la `homepage` e il `maintainer` qui sotto, poi
+    # `npx electron-builder --linux deb` dopo un `npm run build` -- la lista dei
+    # bersagli data sulla riga di comando ha la meglio su questa
+    # (`processTargets()` in `electron-builder/out/builder.js`). Quando il `.deb`
+    # viene su davvero, il posto giusto è questo elenco, e allora entra anche in
+    # `dist:linux`. Uno script `dist:deb` non c'è finché non può funzionare:
+    # spenderebbe una build intera per arrivare all'errore di fpm.
+  # Regia comanda altoparlanti e telecamere: nei menu sta con l'audio e il video.
+  category: AudioVideo
+
+  # Lega la finestra alla voce di menu. Senza, la build avvisa: «electron uses
+  # desktopName as app_id / WM_CLASS for window association. Without it desktop
+  # environments may not link running windows to this .desktop entry» -- cioè la
+  # finestra di Regia compare nella barra come un'applicazione sconosciuta,
+  # separata dalla sua icona. Il nome vero sta in `desktopName` di package.json
+  # (`it.regia.app`, lo stesso `appId`); questo interruttore fa sì che il file
+  # `.desktop` installato si chiami come lui. In electron-builder 27 sparisce
+  # perché diventa il comportamento fisso, ma qui siamo alla 26.15.3.
+  syncDesktopName: true
+
+  # ⚠️ **Manca l'icona, e si vede.** La build del 10 settembre 2026 lo dice:
+  # «default Electron icon is used — reason=application icon is not set». Il
+  # pacchetto si costruisce lo stesso, parte lo stesso, e mostra l'atomo di
+  # Electron invece di un'icona di Regia -- nel menu, nella barra e
+  # nell'AppImage. Non è un difetto da codice: manca proprio il file, e
+  # inventarne uno qui sarebbe peggio che segnalarlo.
+  #
+  # Quando ci sarà: `icon:` vuole una cartella con dentro i PNG quadrati alle
+  # misure canoniche (`512x512.png` è il minimo che serve), oppure un singolo
+  # PNG da 512. Su Windows l'installer NSIS ne vuole uno `.ico`, che manca
+  # anche lui per la stessa ragione.
+  # icon: build/icone/
+  # ⚠️ **Il maintainer è volutamente assente, non dimenticato.** fpm lo cerca
+  # qui, poi in `author` di package.json. Prima c'era scritto `Regia`: un
+  # segnaposto che il controllo di fpm lo passa, e che finirebbe tale e quale nel
+  # campo `Maintainer` del pacchetto installato, dove la Debian policy vuole
+  # `Nome <indirizzo>`. Lasciandolo fuori, `computeFpmMetaInfoOptions()` accumula
+  # gli errori e li rilancia insieme: chi riattiva il `.deb` scopre in una volta
+  # sola che gli mancano tutti e due.
+  # maintainer: Nome Cognome <indirizzo@esempio.it>
+
+# ⚠️ **La homepage del `.deb`, quando ci sarà.** Il valore letto è
+# `this.info.metadata.homepage` in `appInfo.computePackageUrl()`, cioè `homepage`
+# dei metadati dell'applicazione: metterlo in package.json è la via diretta e
+# verificata; `extraMetadata` qui sotto è il modo di electron-builder per
+# aggiungerlo senza toccare package.json, ed è l'idioma consigliato dalla sua
+# documentazione -- che il valore arrivi fin lì non l'ho letto nel codice.
+# Ci va l'indirizzo del committente: inventarne uno finto finirebbe nel campo
+# `Homepage` del pacchetto installato, e resterebbe lì.
+# extraMetadata:
+#   homepage: https://...
+
+appImage:
+  # Lo stesso nome del portabile di Windows, perché è la stessa cosa: chi cerca
+  # "l'eseguibile" trova un file che si chiama come si aspetta.
+  artifactName: ${productName}-${version}-portabile.${ext}

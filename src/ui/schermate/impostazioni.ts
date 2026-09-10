@@ -25,7 +25,23 @@ export class Impostazioni implements Schermata {
   private readonly banda = el('p', { class: 'nota' })
   private readonly campi = new Map<string, HTMLInputElement | HTMLSelectElement>()
   private readonly statoServer = el('span', { class: 'pastiglia spento' })
+  /**
+   * Il campo della distro esiste sempre e si vede solo su Windows.
+   *
+   * Si nasconde il controllo, non si cancella il dato: `progetto.server.distro`
+   * resta scritto e il file continua ad aprirsi da tutte e due le parti. Un
+   * progetto preparato in casa su Windows e portato sul PC Linux della serata
+   * non deve perdere per strada il nome della distro a cui tornera domani.
+   */
+  private readonly campoDistro = el('label', { class: 'campo' })
   private readonly ponte = el('p', { class: 'nota' })
+  /**
+   * Cosa non c'e dentro il progetto esportato: dipende dal sistema, come la
+   * nota gemella in Dispositivi. Su Windows le password ci sono e restano
+   * fuori dal file perche sono cifrate con DPAPI; fuori da Windows non ce n'e
+   * nessuna da tenere fuori, perche non ne viene salvata nessuna.
+   */
+  private readonly notaEsportazione = el('p', { class: 'nota' })
   private readonly righe = el('div', { class: 'diario' })
   private quanteRighe = -1
 
@@ -90,6 +106,12 @@ export class Impostazioni implements Schermata {
     this.imposta('portaBaseFlussi', String(a.portaBaseFlussi))
     this.imposta('nomeProgetto', stato.progettoNome)
 
+    // La Sede e una distro solo su Windows: altrove il campo non ha niente da
+    // dire e sparisce. Si nasconde il controllo, non il valore -- `imposta`
+    // qui sopra continua a scriverlo, e il progetto se lo porta dietro.
+    const suWindows = stato.ambiente.piattaforma === 'windows'
+    this.campoDistro.hidden = !suWindows
+
     const indirizzi = stato.ambiente.indirizzi
     testo(
       this.ponte,
@@ -97,7 +119,26 @@ export class Impostazioni implements Schermata {
         ? 'Nessun indirizzo di rete trovato.'
         : 'Nei telefoni, in Snapdroid, va scritto uno di questi indirizzi: ' +
           indirizzi.map((i) => `${i.ip} (${i.interfaccia})`).join(', ') +
-          '. Regia apre da sola un ponte di rete se WSL non espone le porte sulla LAN.',
+          '. ' +
+          (suWindows
+            ? 'Snapserver ascolta dentro la distro: Regia apre da sola un ponte di rete ' +
+              'quando quelle porte non escono gia sulla LAN da sole (ADR 0010).'
+            : 'Snapserver gira qui e ascolta gia su 0.0.0.0: i telefoni lo raggiungono ' +
+              'da soli, e nessun ponte si mette in mezzo.'),
+    )
+
+    // Fuori da Windows non c'e niente da promettere: `dpapiDisponibile()` dice
+    // subito di no e la password non viene mai scritta sul disco (§6: cifrate o
+    // non salvate). Dire "non e nel file esportato" sarebbe vero e fuorviante,
+    // perche farebbe credere che da qualche parte sia salvata.
+    testo(
+      this.notaEsportazione,
+      suWindows
+        ? 'Il progetto esportato non contiene le password delle Telecamere: sono cifrate con ' +
+            'DPAPI, legate a questo utente su questo PC, e altrove sarebbero comunque illeggibili.'
+        : 'Il progetto esportato non contiene password di Telecamere perche qui non ne viene ' +
+            'salvata nessuna: DPAPI e di Windows, e senza di lei la password resta in memoria ' +
+            'finche Regia e aperta e poi va riscritta.',
     )
   }
 
@@ -181,6 +222,16 @@ export class Impostazioni implements Schermata {
     const ricollega = el('button', { class: 'pulsante', type: 'button', testo: 'Ricollega tutto' })
     ricollega.addEventListener('click', () => this.ctx.manda({ tipo: 'ricollegaTutto' }))
 
+    this.campoDistro.append(
+      'Distro WSL',
+      distro,
+      el('span', {
+        class: 'nota',
+        testo: 'Snapserver non gira nativo su Windows: la compilazione del server e ' +
+          'esclusa a monte per WIN32, quindi la Sede e una distro.',
+      }),
+    )
+
     return el(
       'div',
       { class: 'scheda' },
@@ -193,17 +244,7 @@ export class Impostazioni implements Schermata {
       el(
         'div',
         { class: 'griglia-campi' },
-        el(
-          'label',
-          { class: 'campo' },
-          'Distro WSL',
-          distro,
-          el('span', {
-            class: 'nota',
-            testo: 'Snapserver non gira nativo su Windows: la compilazione del server e ' +
-              'esclusa a monte per WIN32.',
-          }),
-        ),
+        this.campoDistro,
         this.numero('portaControllo', 'Porta di controllo', 'JSON-RPC. Snapdroid la apre per prima.', (v) =>
           this.ctx.manda({ tipo: 'impostazioni.server', portaControllo: v }),
         ),
@@ -340,12 +381,7 @@ export class Impostazioni implements Schermata {
         const primo = file[0]
         if (primo) void this.importaProgetto(primo)
       }),
-      el('p', {
-        class: 'nota',
-        testo:
-          'Il progetto esportato non contiene le password delle Telecamere: sono cifrate con ' +
-          'DPAPI, legate a questo utente su questo PC, e altrove sarebbero comunque illeggibili.',
-      }),
+      this.notaEsportazione,
     )
   }
 

@@ -4,9 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ---
 
-**Regia** è un'applicazione Windows che controlla l'audio e il video di una casa degli orrori:
-telefoni Android come altoparlanti (via Snapcast/Snapdroid) e come telecamere (via
+**Regia** controlla l'audio e il video di una casa degli orrori: telefoni Android come
+altoparlanti (via Snapcast/Snapdroid) e come telecamere (via
 DigitallyRefined/android-ip-camera), comandati da un unico PC.
+
+Gira **su Windows e su Linux**, e la differenza che conta sta in un posto solo: la **Sede**,
+cioè la macchina dove gira snapserver — una distro WSL su Windows, il PC stesso su Linux
+(ADR 0011). `src/engine/snapcast/sede.ts` è l'unico posto in cui il motore decide *dove gira
+snapserver*; supervisore, riconciliatore e thread audio parlano a una `Sede` e non sanno quale
+delle due sia. C'è un secondo posto che guarda `process.platform` e va nominato perché non è
+dello stesso genere: `src/engine/ambiente.ts`, che non decide niente ma **lo dice** — è da lì
+che esce il campo `piattaforma` di `AmbienteVivo`, quello che l'interfaccia non può dedurre dal
+proprio ambiente perché il tablet della Fase 3 non gira sulla macchina del motore. Altrove
+`process.platform` compare ancora, ma per domande diverse e piccole (il nome del binario di
+ffmpeg, il lettore dell'anteprima, DPAPI, il comando che apre una cartella).
+**La Sede locale è stata eseguita su un kernel Linux vero, non su una macchina Linux vera**: la
+prova del 10 settembre 2026 gira dentro la distro `Ubuntu` di questa macchina — snapserver
+nativo, nessun `wsl.exe` — ma senza telefoni, senza pacchetto e senza sessione desktop. Le righe
+`[sorgente]` e `[misurato]`, e l'elenco di ciò che resta da provare, stanno in fondo a
+`docs/fatti-verificati.md`.
 
 `project.md` è il documento del committente. **Non è la verità corrente**: contiene errori di
 fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
@@ -15,13 +31,14 @@ fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
 ## Comandi
 
 ```bash
-npm test                      # 200 test. Concorrenza 1: ogni motore avvia un thread audio
+npm test                      # 234 test. Concorrenza 1: ogni motore avvia un thread audio
 npm run typecheck             # engine, shell, interfaccia, test dell'interfaccia
 npm run build                 # interfaccia + motore + guscio
 npm run dev                   # compila l'interfaccia e avvia Regia senza finestra, su :7333
 
 npm run ffmpeg:prendi         # 133 MB in vendor/ffmpeg, non versionati. Da fare una volta
 npm run dist:win              # build + electron-builder -> out/ (portabile + installer NSIS)
+npm run dist:linux            # build + electron-builder -> out/ (AppImage + tar.gz). Da Linux
 
 # un solo file di test
 node --import tsx --test src/engine/audio/mixer.test.ts
@@ -32,41 +49,71 @@ node --import tsx --test --test-name-pattern="sei ore" src/engine/audio/cadenza.
 I test girano con il loader `tsx`, non con lo strip-types di Node: gli import interni usano
 l'estensione `.js` (convenzione NodeNext) anche se i file sono `.ts`.
 
-**Il pacchetto non e autosufficiente, e non puo diventarlo.** `out/Regia-...-portabile.exe`
-contiene guscio, motore, interfaccia e ffmpeg, ma non WSL2 -- che vuole Virtual Machine
-Platform, la virtualizzazione da BIOS e un riavvio (ADR 0003) -- e non contiene ancora la
-distro con snapserver dentro: `distro.ts` si aspetta che una distro gia installata venga
-scelta in Impostazioni. Su un PC non preparato il pacchetto parte e il server audio resta
-`spento`. Le scelte di impacchettamento stanno commentate in `electron-builder.yml`.
+**Serve Node 24, non 22, e non e una preferenza.** Il thread audio nasce da
+`new Worker(PERCORSO_LAVORATORE)` con un percorso `.ts`, e il registrar di `tsx` **non entra nei
+worker**: su Node 22 il worker muore subito con `Unknown file extension ".ts"`, `aspettaPronto()`
+non torna mai, e `avviaMotore()` resta appeso per sempre -- l'intera suite di `index.test.ts` si
+annulla senza un errore che spieghi perche. Node 24 i tipi li toglie da se e il worker parte.
+Misurato su Linux con tutti e due (fatti verificati); su Windows non si era mai visto perche li
+girava gia Node 24. Il pacchetto non ne soffre: dentro c'e `dist/**/*.js`, gia compilato.
+
+**Nessun pacchetto contiene snapserver, e le due ragioni non sono la stessa.** Su Windows
+`out/Regia-...-portabile.exe` contiene guscio, motore, interfaccia e ffmpeg ma non WSL2 — che
+vuole Virtual Machine Platform, la virtualizzazione da BIOS e un riavvio (ADR 0003) — e non
+contiene ancora la distro con snapserver dentro: `sede.ts` si aspetta che una distro già
+installata venga scelta in Impostazioni. Su Linux quella frase non vale più: il sistema *è* già
+quello che a snapserver serve, non c'è niente da abilitare né da riavviare. Resta che
+snapserver va installato a parte, e con una trappola in più — **`apt install snapserver` su
+Ubuntu 24.04 dà la 0.27.0, che Regia rifiuta di avviare** (ADR 0011); serve il `.deb` ufficiale
+0.35. In tutti e due i casi il pacchetto parte e il server audio resta `spento` finché manca.
+Le scelte di impacchettamento stanno commentate in `electron-builder.yml`.
+
+**`ffmpeg:prendi` prende il binario della piattaforma che lo esegue**, e in `vendor/ffmpeg` ce
+ne sta uno per volta: `extraResources` copia quella cartella intera, e `trovaFfmpeg()` cerca
+`ffmpeg.exe` su Windows e `ffmpeg` altrove. **Il pacchetto Linux si costruisce su Linux**, e per
+due ragioni indipendenti: electron-builder su Windows non ha gli attrezzi per farlo (`mksquashfs`
+lo cerca solo per linux e darwin), e comunque `vendor/ffmpeg` conterrebbe il binario sbagliato.
+I bersagli Linux sono **AppImage e `tar.gz`**: il `.deb` e escluso apposta, e in
+`electron-builder.yml` c'e scritto cosa serve per riattivarlo.
 
 **Regia si avvia anche senza Electron**: `npx tsx src/engine/avvia.ts --porta 7333 [--rete]`
 serve l'interfaccia vera su HTTP, ed è il modo più rapido per pilotarla da script e guardarla
 insieme. `--rete` la espone a tutta la LAN invece che a loopback (è il tablet della Fase 3).
 
-## Il banco di prova (richiede WSL)
+## Il banco di prova (richiede una Sede)
 
-Snapserver non gira nativo su Windows (ADR 0002), quindi il collaudo passa da una distro WSL.
+Il collaudo gira **dentro la Sede**, la stessa del motore: `banco/sede-banco.ts` importa
+`sedeDi()` da `src/engine/snapcast/sede.ts` invece di imitarlo, perché un banco che parlasse
+alla Sede in un modo diverso da Regia misurerebbe un ambiente che al debutto non esiste. Su
+Windows significa una distro WSL, su Linux questo PC.
 
 ```bash
-npm run banco:prepara         # scarica snapserver+snapclient 0.35 nella distro, versione fissata
+npm run banco:prepara         # scarica snapserver+snapclient 0.35 nella Sede, versione fissata
+                              # (su Linux chiede sudo: /opt non è dell'utente)
 npm run banco:conf -- Ingresso Cantina Soffitta > /tmp/rg.conf
-wsl -d Ubuntu -u root -e bash -lc 'cat > /tmp/regia/snapserver.conf' < /tmp/rg.conf
-wsl -d Ubuntu -u root -e bash -lc \
-  'setsid /opt/snapserver-0.35/usr/bin/snapserver -c /tmp/regia/snapserver.conf \
-   > /tmp/regia/server.log 2>&1 < /dev/null & disown'
+# poi si scrive la conf nella Sede e si lancia snapserver con setsid:
+# i due comandi esatti li stampa `banco:prepara`, e sono diversi nelle due Sedi
 
-npx tsx banco/altoparlanti-finti.ts 4   # Altoparlanti finti DENTRO la distro
+npx tsx banco/altoparlanti-finti.ts 4   # Altoparlanti finti DENTRO la Sede
+npx tsx banco/prova-flusso.ts           # gli stream passano a playing mentre si scrive
 npm run banco:riconcilia                # riconciliatore contro il server vero
-# HOST_FLUSSI va all'indirizzo della distro: su loopback gli inoltri di WSL
-# sopravvivono al server morto e il banco misurerebbe un Flusso dentro un fantasma.
-HOST_FLUSSI=$(wsl -d Ubuntu hostname -I | cut -d' ' -f1) \
-  npm run banco:carico -- 40            # blocca il thread principale, verifica che l'audio regga
+npm run banco:carico -- 40              # blocca il thread principale, verifica che l'audio regga
 ```
 
+`REGIA_DISTRO` sceglie la distro del banco su Windows (`Ubuntu` di default, **non** il
+`Regia-Snapserver` dell'ADR 0003 che il progetto propone). L'indirizzo delle sorgenti non si
+passa più a mano: lo chiede alla Sede, e se non riesce a leggerlo **si ferma invece di ripiegare
+su `127.0.0.1`** — contro un server morto la `connect()` riuscirebbe lo stesso attraverso un
+inoltro di WSL, e la misura sarebbe una bugia. `HOST_FLUSSI` resta e vince su tutto, per puntare
+il banco a un server su un'altra macchina.
+
 `setsid` è obbligatorio: senza, snapserver riceve SIGHUP e muore appena esce il `wsl.exe` che l'ha
-lanciato, e `nohup` da solo non basta. Gli Altoparlanti finti girano **dentro la distro** perché il
-`snapclient.exe` per Windows non si sincronizza con un server Linux — riporta uno scarto d'orologio
-di un epoch Unix e scarta ogni chunk.
+lanciato, e `nohup` da solo non basta. Resta anche su Linux, dove nessuno lo ucciderebbe, perché è
+così che lo avvia il supervisore e il banco deve provare quel comando lì. Gli Altoparlanti finti
+girano **dentro la Sede** perché il `snapclient.exe` per Windows non si sincronizza con un server
+Linux — riporta uno scarto d'orologio di un epoch Unix e scarta ogni chunk. Su Linux quel
+meccanismo non c'è, quindi il giro non servirebbe: **non è stato provato**, e il comando resta
+identico perché passa comunque dalla Sede.
 
 ## Architettura
 
@@ -92,7 +139,12 @@ ha nemmeno lo stesso disco.
 |---|---|---|
 | thread principale | Node/Electron | progetto, comandi, HTTP/WS, RPC Snapcast, video, ffmpeg |
 | thread audio | `worker_thread` | tutti i mixer, tutti gli scrittori TCP, i campioni PCM |
-| snapserver | processo in WSL | distribuisce l'audio ai telefoni |
+| snapserver | processo nella Sede | distribuisce l'audio ai telefoni |
+
+La terza riga è l'unico confine che **cambia natura** fra le due piattaforme: su Windows sta
+dentro una macchina virtuale con un'altra rete e un altro orologio, su Linux è un processo
+accanto agli altri. È esattamente il motivo per cui ci passa un'interfaccia e non un `if`
+(ADR 0011): il resto del motore non deve accorgersene.
 
 Il thread audio esiste per una misura, non per gusto: con i mixer sul thread principale lo
 scrittore restava indietro di oltre mezzo secondo sotto carico e perdeva Flusso. Il confine **non
@@ -110,8 +162,8 @@ completa minuti dopo con un riferimento temporale vecchio.
 ### Convenzioni
 
 - **Il dominio si scrive in italiano, la meccanica in inglese.** Zona, Altoparlante, Telecamera,
-  Suono, Effetto, Sottofondo, Flusso, Identifica. `CONTEXT.md` è il glossario e va tenuto
-  aggiornato; è deliberatamente privo di dettagli implementativi.
+  Suono, Effetto, Sottofondo, Flusso, Identifica, Ponte, Sede. `CONTEXT.md` è il glossario e va
+  tenuto aggiornato; è deliberatamente privo di dettagli implementativi.
 - **Gli schemi Zod in `src/engine/dominio/progetto.ts` sono la sola fonte di verità dei tipi**:
   i tipi TypeScript sono inferiti da lì, così non possono divergere dalla validazione.
 - L'appartenenza a una Zona vive **sul dispositivo**, non come elenco nella Zona: l'invariante
@@ -120,10 +172,10 @@ completa minuti dopo con un riferimento temporale vecchio.
 ## Le tre fonti di documentazione
 
 - **`docs/fatti-verificati.md`** — leggerlo **prima** di cambiare qualunque cosa tocchi Snapcast,
-  WSL, ffmpeg o le telecamere. Ogni riga è marcata `[sorgente]` (letto nel codice upstream),
+  la Sede, ffmpeg o le telecamere. Ogni riga è marcata `[sorgente]` (letto nel codice upstream),
   `[misurato]` (eseguito su questa macchina) o `[surrogato]` (misurato su un sostituto, da rifare).
   Quando il codice sembra strano, la ragione è quasi sempre lì.
-- **`docs/adr/`** — dieci decisioni, ciascuna con le alternative scartate e perché. Alcune sono
+- **`docs/adr/`** — undici decisioni, ciascuna con le alternative scartate e perché. Alcune sono
   state **corrette dopo la ricerca**: la correzione è in fondo al file, non sostituisce il testo.
 - **`docs/scostamenti-dal-documento-di-progetto.md`** — errori e criteri irraggiungibili di
   `project.md`, da riportare al committente.
@@ -141,10 +193,24 @@ si aggiunge un ADR. Quando si misura qualcosa, si aggiunge una riga ai fatti ver
   per porta e il kernel parcheggia le altre. Una sola socket per porta, sempre. Vale anche per la
   **porta di controllo**: la prova che snapserver c'è è una risposta a `Server.GetStatus`, non una
   connessione aperta.
-- **Si parla alla distro per indirizzo IP, mai a `127.0.0.1`** (ADR 0010). Gli inoltri che WSL
-  crea su loopback **sopravvivono al processo che ascoltava**: `connect()` riesce, i byte partono,
-  non li legge nessuno. E `0.0.0.0` contiene `127.0.0.1`, quindi un ponte che inoltra lì parla con
-  se stesso.
+- **A una Sede WSL si parla per indirizzo IP, mai a `127.0.0.1`** (ADR 0010) — e a una Sede
+  locale `127.0.0.1` è invece la risposta giusta. Non è una regola sul loopback, è una regola su
+  WSL: gli inoltri che WSL crea su loopback **sopravvivono al processo che ascoltava**, quindi
+  `connect()` riesce, i byte partono, non li legge nessuno. E `0.0.0.0` contiene `127.0.0.1`,
+  quindi un ponte che inoltra lì parla con se stesso. Dove non c'è WSL non c'è nessun inoltro,
+  snapserver ascolta già su `0.0.0.0`, e **il ponte non si apre affatto**: lo dice `serveIlPonte`,
+  che è un membro della Sede e non una deduzione dall'indirizzo — dedurlo faceva scrivere nel
+  Diario «i telefoni potrebbero non vedere il server audio» su un sistema che funziona (ADR 0011).
+- **Snapserver sotto la 0.33 legge il nostro file e ne ignora metà, senza un errore.** In 0.33
+  `[tcp]` è diventata `[tcp-control]`: una versione precedente parte, ascolta sulle porte sue, e
+  il sintomo si scopre a metà serata. `avvia()` legge la versione e rifiuta invece di partire
+  storto. Non è teorico: `apt install snapserver` su Ubuntu 24.04 dà la 0.27.0.
+- **Su Linux Regia gira come l'utente che ha fatto login, non come root in una distro sua.**
+  Quindi il `datadir` viene dalla Sede (`/var/lib/snapserver` è dell'utente di sistema
+  `snapserver`, a 0750) e la cartella di lavoro sta in `XDG_RUNTIME_DIR`; e il `pkill -x
+  snapserver` **non tocca** un `snapserver.service` che gira sotto un altro utente e tiene le
+  porte — quando l'avvio fallisce il supervisore lo dice per nome, chiedendolo a `systemctl
+  is-active`.
 - **Uno stream `idle` non vuol dire che non arrivano byte: vuol dire che arriva silenzio.** A casa
   vuota tutti gli stream sono `idle` ed è giusto così. Il criterio «passano a `playing`» vale
   mentre si suona qualcosa.

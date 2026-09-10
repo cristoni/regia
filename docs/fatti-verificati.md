@@ -30,6 +30,13 @@ macchina · **[surrogato]** misurato su qualcosa che somiglia al vero, e va rifa
 - **[sorgente]** Sezioni della 0.35: `[server]`, `[ssl]`, `[authorization]`, `[http]`,
   `[tcp-control]`, `[tcp-streaming]`, `[stream]`, `[streaming_client]`, `[logging]`. Le vecchie
   `[tcp]` e `stream.port` sono accettate come deprecate, con warning. `snapserver.cpp:118-145`
+- **[sorgente]** ⚠️ **Quei nomi arrivano nella 0.33**, non prima: il changelog di upstream elenca
+  fra le modifiche della **0.33.0** (23 settembre 2025) «`tcp` section in `snapserver.conf`
+  renamed to `tcp-control`» e «TCP streaming settings moved from `stream` to `tcp-streaming`».
+  La tolleranza vista nella riga qui sopra e a senso unico: una 0.35 capisce ancora un file
+  scritto per la 0.27, una 0.27 non puo capire un nome inventato nel 2025. `changelog.md`
+  → E il motivo del cancello di versione dell'[ADR 0011](adr/0011-dove-gira-snapserver-e-una-sede-non-un-if.md):
+  su Linux la versione la sceglie chi installa, e l'apt di Ubuntu 24.04 da la 0.27.0.
 - **[sorgente]** `snapserver` non ha ricaricamento a caldo: SIGHUP, SIGINT e SIGTERM condividono
   lo stesso handler di spegnimento. Conferma [ADR 0005](adr/0005-il-file-di-progetto-e-la-verita-snapserver-e-una-proiezione.md):
   cambiare le Zone significa riavviare, non ricaricare.
@@ -500,7 +507,7 @@ un Sottofondo in una Zona. Sintomo osservato dall'Operatore: «i ms persi salgon
   producendo piu lentamente del tempo reale) con la parola sbagliata.
 - **[misurato]** La connessione RPC di controllo va a **`127.0.0.1:1705`** (`OPZIONI_RPC` in
   `snapcast/rpc.ts`), mentre le sorgenti audio vanno all'IP della distro. E esattamente il percorso
-  che l'ADR 0010 vieta, e il commento a `suIndirizzoDistro` in `supervisore.ts` lo dice a due
+  che l'ADR 0010 vieta, e il commento a `suIndirizzoFlussi` in `supervisore.ts` lo dice a due
   schermate di distanza. Regge solo perche `collegaEVerifica()` pretende una risposta vera a
   `Server.GetStatus` prima di dichiararsi acceso.
 
@@ -529,7 +536,8 @@ portabile e un installer NSIS, **111 MB** l'uno.
   -- era quello della sessione `tsx` di prima, sopravvissuto al suo `wsl.exe` grazie a `setsid`.
   Il pacchetto lo stava soltanto **raggiungendo**.
   Rifatta dopo un `pkill -f snapserver` nella distro: il portabile parte, `clienti: 1`,
-  `wsl: ok`, e `server: spento` -- che e **giusto**, perche l'accensione e un comando
+  `wsl: ok` (quel campo oggi si chiama `sede`, ed e la Sede WSL: vedi ADR 0011), e
+  `server: spento` -- che e **giusto**, perche l'accensione e un comando
   dell'Operatore (`server.avvia`), non una cosa che succede al lancio. Mandato quel comando dal
   WebSocket come farebbe il pulsante, lo stato passa ad `acceso`, i tre scrittori tornano
   `attivo`, e nella distro compare un snapserver di **un secondo** di vita. Il percorso guscio →
@@ -544,3 +552,208 @@ portabile e un installer NSIS, **111 MB** l'uno.
   enumera le distro già installate e si aspetta che una venga scelta in Impostazioni, con
   `/opt/snapserver-0.35` scritto nel codice. Su un PC senza quella preparazione il pacchetto
   parte, mostra la finestra, e il server audio resta `spento`.
+  → `distro.ts` **non esiste più**: da quando Regia gira anche su Linux quel codice sta in
+  `sede.ts`, l'enumerazione è `distroInstallate()` e il percorso fissato è `BINARIO_SNAPSERVER`.
+  Il resto della riga vale identico, e vale **solo per il pacchetto Windows**.
+
+---
+
+## Linux e la Sede: cosa si sa, e con quanta forza
+
+Regia si compila e gira anche su Linux
+([ADR 0011](adr/0011-dove-gira-snapserver-e-una-sede-non-un-if.md)), dove snapserver e nativo e
+non serve nessuna distro. ⚠️ **La porta è stata eseguita su un kernel Linux vero, non su una
+macchina Linux vera**, e la differenza non è un cavillo: la prova del 10 settembre 2026 gira
+**dentro la distro `Ubuntu` di questa macchina**, cioè come root, senza sessione grafica, senza
+telefoni, senza pacchetto e con l'orologio storto che la sezione «L'orologio della distro detta
+il ritmo» ha già misurato. Tutto ciò che dipende da quelle cose sta ancora nell'elenco in fondo,
+e ci sta per una ragione, non per prudenza. Se qualcuno aggiunge un `[misurato]` qui, dica su
+quale macchina e con quale distribuzione.
+
+### Letto nel sorgente
+
+- **[sorgente]** `BUILD_SERVER` sta dentro `if(NOT WIN32)`, quindi **fuori da Windows il server
+  si compila**. E la stessa riga su cui poggia l'[ADR 0002](adr/0002-il-server-audio-non-gira-nativo-su-windows.md),
+  letta nella direzione opposta. `CMakeLists.txt`
+- **[sorgente]** L'mDNS di snapserver **esiste su Linux**: l'opzione `BUILD_WITH_AVAHI` e
+  dichiarata `ON` di default, e il blocco che la usa — quello che definisce `HAS_AVAHI` e
+  `HAS_MDNS` — sta dentro `if(NOT WIN32 AND NOT ANDROID)`. Regia tiene `mdns_enabled = false` lo
+  stesso, per le ragioni nella correzione dell'ADR 0002. `CMakeLists.txt`
+- **[sorgente]** ⚠️ **Il pacchetto Debian di snapserver crea un utente di sistema `snapserver`**
+  con casa `/var/lib/snapserver`, creata a `0750` e di proprieta di `snapserver:snapserver`.
+  `extras/package/debian/snapserver.postinst`
+  → E precisamente il motivo per cui il `datadir` non puo restare il default
+  `/var/lib/snapserver`: su Linux Regia gira come l'utente che ha fatto login, e quella cartella
+  esiste ed e esattamente non sua. Il `datadir` viene dalla Sede.
+- **[sorgente]** ⚠️ **`snapserver.service` gira sotto `User=snapserver` / `Group=snapserver`**,
+  con `Restart=on-failure`, `WantedBy=multi-user.target` e
+  `ExecStart=/usr/bin/snapserver --logging.sink=system --server.datadir=${HOME} $SNAPSERVER_OPTS`.
+  `extras/package/debian/snapserver.service`
+  → Un `pkill -x snapserver` lanciato dall'utente che ha fatto login **non ha il permesso di
+  segnalarlo**, e non deve averlo. Da qui il `systemctl is-active snapserver` che il supervisore
+  fa quando l'avvio fallisce: dire chi tiene la porta, per nome, invece di lasciare un
+  `address already in use` senza colpevole.
+  ⚠️ Questi due file stanno in `extras/package/` di **upstream**: sono la sua idea di come
+  impacchettare snapserver, non la prova di cosa spedisca l'archivio di Ubuntu. Chi lo verifica
+  su una macchina vera sostituisca queste due righe con dei `[misurato]`.
+
+### La Sede locale, misurata il 10 settembre 2026
+
+Dentro la distro `Ubuntu` di questa macchina — kernel Linux vero — con Node 22.11.0 e snapserver
+0.35.0 in `/opt/snapserver-0.35`.
+
+- **[misurato]** `SedeLocale` trova il binario da sola, genera `snapserver.conf`, avvia il
+  processo **nativamente** e si collega in JSON-RPC. Tre Zone più i non assegnati fanno quattro
+  Flussi, e il server li dichiara tutti e quattro. Nessun `wsl.exe` in mezzo.
+- **[misurato]** Nella stessa prova il ponte **non si apre** — `statoPonte()` torna vuoto — e le
+  porte 1704, 1705, 1780 e 4953-4956 risultano in `LISTEN` su `0.0.0.0`. È il comportamento che
+  l'ADR 0011 dichiara, visto invece che dedotto.
+  ⚠️ **La metà che conta per i telefoni non è misurata.** Che le porte siano in ascolto su
+  `0.0.0.0` è `[misurato]`; che un telefono le raggiunga dalla LAN è **dedotto**, e vale
+  `[surrogato]`. La deduzione è vera su una Ubuntu vera e **falsa proprio qui**: dentro WSL2 in
+  NAT snapserver ascolta su `0.0.0.0` da sempre, e il telefono non lo vede lo stesso — è
+  letteralmente il guasto da cui nasce l'[ADR 0010](adr/0010-il-ponte-di-rete-fa-parte-di-regia.md).
+  Resta da rifare, ed è la voce 1 dell'elenco qui sotto.
+- **[misurato]** Il `datadir` finisce sotto la cartella di lavoro — `/run/user/0/regia/dati`, da
+  `XDG_RUNTIME_DIR` — e non in `/var/lib/snapserver`, che fuori dalla distro un utente non
+  potrebbe scrivere. La conseguenza scritta nell'ADR 0011 si vede nel percorso.
+- **[misurato]** **Il percorso Windows non è cambiato.** Da Windows, con la Sede WSL puntata
+  sulla distro `Ubuntu`: snapserver 0.35.0 trovato dentro la distro, avviato, RPC collegato,
+  `indirizzoFlussi()` = `172.30.235.47` — l'IP della distro, **non** `127.0.0.1` — e ponte aperto
+  e attivo su 1704, 1705 e 1780 verso quell'indirizzo. La Sede non ha tolto niente a chi già
+  funzionava, ed è la metà della porta che si poteva rompere in silenzio.
+- **[misurato]** ⚠️ **Un snapserver estraneo risponde come il nostro e non viene adottato.**
+  Acceso a mano con una configurazione sua — cioè il caso dello `snapserver.service` che molte
+  distribuzioni impacchettano — risponde a `Server.GetStatus` esattamente come risponderebbe il
+  nostro, ma `adotta()` torna `false`, lo stato resta `spento` e il Diario nomina i Flussi che
+  mancano («non ha i Flussi Ingresso, Non assegnati»). Senza questo controllo la serata sarebbe
+  finita in «Stream not found» a ogni riconciliazione: gli stream li crea il file di
+  configurazione, e quel file è il suo.
+- **[misurato]** ⚠️ **Una shell di login sporca l'uscita dei comandi nella Sede.** `bash -lc`
+  sorgente `/etc/profile` e `~/.profile`: con due `echo` aggiunti al profilo, l'uscita di ogni
+  comando se li porta in testa. Per questo la ricerca di snapserver stampa righe **marcate**
+  (`REGIA-SEDE-DOVE:`, `REGIA-SEDE-VERSIONE:`) e si leggono solo quelle; prendendo «la prima
+  riga» Regia avrebbe usato il saluto del profilo come percorso del binario. Verificato che col
+  profilo sporcato la Sede trova comunque `/opt/snapserver-0.35/usr/bin/snapserver` 0.35.0.
+  → Dentro la distro dedicata dell'ADR 0003 il profilo non stampa mai niente, ed è per questo
+  che su Windows la cosa non si era mai vista. Su un PC Linux di qualcun altro è la normalità.
+
+### Il progetto intero su un checkout Linux pulito, 10 settembre 2026
+
+- **[misurato]** Copia del repo dentro la distro `Ubuntu` (`/root/regia-linux`, **senza**
+  `node_modules` né `dist`: quelli di Windows contengono binari che lì non si eseguono), poi
+  `npm install` nativo. `npm run typecheck` passa su tutti e quattro i tsconfig, `npm run build`
+  costruisce interfaccia, motore e guscio, e `npm test` chiude con **224 test, 224 passati, 0
+  falliti, 0 annullati** — con Node 24.
+- **[misurato]** ⚠️ **Con Node 22 lo stesso checkout non regge, e il guasto non è di Linux.** Il
+  thread audio nasce da `new Worker()` con un percorso `.ts`, e il registrar di `tsx` **non entra
+  nei worker**: su Node 22.11 il worker muore all'istante con `Unknown file extension ".ts" for
+  .../lavoratore.ts`, `aspettaPronto()` non torna mai, e `avviaMotore()` resta appeso — tutte e
+  nove le prove di `index.test.ts` si annullano senza un errore che spieghi il perché. Node 24 i
+  tipi li toglie da sé e il worker parte. Su Windows non si era mai visto perché lì gira già Node
+  24. → `engines.node` diceva `>=22` ed era falso per chi sviluppa: portato a `>=24`. Il
+  pacchetto non ne soffre, dentro c'è `dist/**/*.js` già compilato.
+- **[misurato]** **`scrittore.ts` chiamava `unref()` sulla scadenza dell'attesa di scarico**,
+  contro la regola già scritta in `CLAUDE.md` («non chiamare `unref()` sul thread audio»). Quando
+  la socket è parcheggiata `attendiScarico()` è una promessa che non si risolve mai e non
+  trattiene niente: con la scadenza staccata non resta più nulla a tenere vivo il ciclo di
+  eventi, e Node lo svuota **mentre lo scrittore sta ancora aspettando** — cioè esattamente il
+  caso che quella funzione esiste per risolvere. Su Linux con Node 22 tre prove dello scrittore
+  finivano in «Promise resolution is still pending but the event loop has already resolved»
+  invece di misurare. Tolto l'`unref`: 20/20, e su Windows nessuna regressione.
+  → Su Windows la risoluzione dei timer è 15,6 ms e c'è quasi sempre un altro timer in volo a
+  tenere aperto il giro: il difetto era lì da prima della porta, ed è Linux ad averlo mostrato.
+
+### Il pacchetto Linux, costruito il 10 settembre 2026
+
+- **[misurato]** `npm run ffmpeg:prendi` su Linux scarica
+  `ffmpeg-master-latest-linux64-lgpl.tar.xz` (il nome della release di BtbN è quello),
+  estrae **solo** `<nome>/bin/ffmpeg` e `<nome>/LICENSE.txt`, e ne esce un binario
+  `-rwxr-xr-x` di 142.622.632 byte che risponde a `-version`. La catena del `chmod` regge:
+  il bit di esecuzione c'è, e la prova finale lo dimostra invece di darlo per buono.
+- **[misurato]** `npm run dist:linux` arriva in fondo con esito 0 e produce
+  `out/Regia-0.1.0-portabile.AppImage` (162 MB) e `out/regia-0.1.0.tar.gz` (154 MB).
+- **[misurato]** Dentro il pacchetto c'è quello che deve esserci, e nei posti giusti.
+  `resources/vendor/ffmpeg/ffmpeg` è un ELF x86-64 `-rwxr-xr-x` **e si esegue da lì**, ed è
+  esattamente il percorso che `radiciCandidate()` calcola da `process.execPath` (l'eseguibile
+  è `linux-unpacked/regia`). L'intestazione di `app.asar` elenca `dist/shell/shell/main.js`,
+  `dist/shell/engine/index.js`, `dist/ui/index.html` e — la riga che conta —
+  **`dist/shell/engine/audio/lavoratore.js`**: il thread audio nasce da dentro l'archivio su
+  Linux come su Windows, senza copia in `app.asar.unpacked`.
+- **[misurato]** L'AppImage si estrae e `AppRun` parte
+  (`--appimage-extract-and-run`). ⚠️ Ma **la finestra non l'ha vista nessuno**: nella distro
+  non c'è sessione grafica. Che l'applicazione si apra davvero resta da provare.
+- **[misurato]** Senza `desktopName` la build avvisa che la finestra non si legherà alla voce
+  di menu (è l'`app_id`/`WM_CLASS`). Messo `desktopName: it.regia.app` in `package.json` e
+  `syncDesktopName: true` in `electron-builder.yml`, l'avviso sparisce e il `.desktop` dentro
+  l'AppImage porta `StartupWMClass=it.regia.app` — letto estraendolo dal pacchetto.
+- **[misurato]** Resta un avviso, ed è vero: «default Electron icon is used — reason=application
+  icon is not set». Nel repo non c'è nessuna icona, né PNG per Linux né `.ico` per l'installer
+  Windows. Il pacchetto si costruisce e parte lo stesso, con l'icona di Electron.
+
+### Da misurare su una macchina Linux vera
+
+In ordine di quanto bloccano. Nessuna di queste è chiusa dalla prova del 10 settembre, e la
+ragione per cui non lo è sta scritta accanto: alcune vogliono un telefono, alcune una sessione
+desktop, alcune un orologio che non sia quello di WSL. Alcune sono **previsioni**, e sono scritte
+come tali apposta, perché una previsione smentita è informazione e una previsione spacciata per
+misura è un danno.
+
+1. **I telefoni raggiungono snapserver senza ponte.** Che le porte siano in `LISTEN` su
+   `0.0.0.0` è misurato; che un telefono ci arrivi no, e dentro WSL2 in NAT quella stessa
+   condizione non basta (ADR 0010). Nessun telefono vero si è mai collegato a un snapserver
+   Linux avviato da Regia. Da verificare insieme: che `AltoparlanteVivo.indirizzo` mostri
+   l'indirizzo **vero** del telefono, che su Windows non si può avere.
+2. **Previsione: lo scarto d'orologio sparisce, e con lui tutta la sezione «L'orologio della
+   distro detta il ritmo».** Quel blocco — l'orologio monotono della distro il 3,5% più lento di
+   quello di Windows, snapserver che legge a 169.797 B/s invece di 176.400, i 730 ms di coda
+   permanenti, i ~25 ms al secondo di ritardo e le ~43 discontinuità al secondo nella forma
+   d'onda — nasce **tutto** dal fatto che il mixer e il server contano il tempo su due orologi
+   diversi. Su Linux l'orologio è uno solo. Ci si aspetta quindi che il Passo del Flusso resti al
+   100% e che lo scarto stia fermo. **Se non succede, la causa non era quella**, e ogni
+   conclusione di quel blocco va riletta da capo.
+   ⚠️ La prova del 10 settembre **non dice niente su questo**: girava dentro la distro, cioè
+   sull'orologio storto, e per giunta senza misurare il Passo.
+3. **La sincronizzazione e la latenza pulsante→suono fra telefoni veri**, con lo sweep
+   dell'anticipo già in elenco fra le misure che restano al telefono vero. Su Windows lo sweep
+   passa dal ponte; su Linux non c'è ponte, quindi non è la stessa misura ed entrambe vanno
+   fatte.
+4. **Se `snapclient` nativo si sincronizza con il snapserver della stessa macchina**, cioè se il
+   banco di prova può avere Altoparlanti finti **nativi**. Su Windows non ci riesce — riporta uno
+   scarto di un epoch Unix e scarta ogni chunk — ed è per questo che oggi girano dentro la
+   distro. Se su Linux funziona, il banco cambia forma: niente distro nemmeno per il collaudo.
+5. **L'anteprima di un Suono dalle casse del PC.** `anteprima.ts` cerca nell'ordine `pw-play`,
+   `paplay`, `aplay`, `ffplay`, e su Windows passa invece da `Media.SoundPlayer` di PowerShell.
+   **Nessuno dei quattro è mai stato eseguito**, e non si sa nemmeno quale di loro si trovi su
+   una Ubuntu desktop appena installata — la prova del 10 settembre girava senza audio e senza
+   sessione grafica, dove nessuno dei quattro avrebbe potuto funzionare comunque.
+6. **`xdg-open` sulla cartella delle registrazioni.** `apri-cartella.ts` lo lancia e, se manca,
+   dice che lo porta `xdg-utils`. Non è mai stato eseguito: serve una sessione grafica, che nella
+   distro non c'è.
+7. **Il ripiego quando `XDG_RUNTIME_DIR` non c'è.** Che il `datadir` finisca dentro
+   `XDG_RUNTIME_DIR` è misurato (`/run/user/0/regia/dati`), ma quella era una sessione root
+   dentro la distro. Da una sessione `ssh` o da una console senza sessione grafica la variabile
+   può mancare, e allora si cade sulla cartella nel temporaneo legata all'utente: **quel percorso
+   non è mai stato percorso**, e con esso il caso di due utenti diversi sulla stessa macchina.
+8. **Il cancello di versione, dal lato che si vuole evitare.** Nessuno ha guardato una 0.27 vera
+   leggere un file con dentro `[tcp-control]`: che la ignori **in silenzio** è la ragione per cui
+   il cancello esiste, non una cosa osservata. Se qualcuno lo prova, la riga da scrivere qui è
+   `[misurato]` e vale la pena scriverla anche se conferma.
+9. **Il messaggio che il supervisore produce quando trova un `snapserver.service` di sistema.**
+   Che un server estraneo non venga adottato è misurato, ed è la metà che protegge la serata. Non
+   è misurata l'altra: quando l'avvio fallisce perché quel servizio tiene le porte, il supervisore
+   chiede `systemctl is-active snapserver` e dovrebbe nominare il colpevole. Quella riga di Diario
+   non l'ha mai letta nessuno, e su una macchina dove qualcuno aveva già fatto
+   `apt install snapserver` è il fallimento più probabile alla prima accensione.
+10. **Il pacchetto Linux: costruito, mai lanciato con uno schermo davanti.** La build c'è (vedi
+    la sezione qui sopra) e dentro c'è tutto quello che deve esserci. Quello che manca è
+    l'unica cosa che la build non può dire: che l'AppImage **si apra** su un desktop vero —
+    con FUSE 3 di mezzo, dove un AppImage di tipo 2 non parte finché qualcuno non installa
+    `libfuse2`, ed è la ragione per cui il `tar.gz` gli sta accanto come ripiego. Nella distro
+    non c'è sessione grafica: si è potuto verificare che l'archivio si estrae e che `AppRun`
+    parte, non che la finestra compaia.
+    → Resta anche l'icona: la build avvisa «default Electron icon is used», e finché nel repo
+    non c'è un file, Regia si presenta con l'atomo di Electron.
+    → E resta da decidere se snapserver vada dichiarato come dipendenza di un `.deb` — oggi il
+    `.deb` non è nemmeno un bersaglio — con gli obblighi GPL-3.0 che ne verrebbero: vedi la
+    correzione dell'ADR 0003.

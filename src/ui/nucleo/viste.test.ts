@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import type { Stato, SuonoVivo, ZonaViva } from '../../engine/api/protocollo'
+import type { AmbienteVivo, Stato, SuonoVivo, ZonaViva } from '../../engine/api/protocollo'
 import {
   celleVideo,
   colonneGriglia,
@@ -19,6 +19,7 @@ import {
   inCorso,
   passoDelFlusso,
   riepilogoSetup,
+  righeAmbiente,
   salute,
   scorciatoie,
 } from './viste'
@@ -39,6 +40,29 @@ function zona(id: string, extra: Partial<ZonaViva> = {}): ZonaViva {
   }
 }
 
+/**
+ * La macchina come la vede il Setup. Il caso base e Windows con tutto a posto,
+ * perche e quello su cui Regia e nata; le prove sulla Sede locale cambiano
+ * `piattaforma`, `sede` e `distro` e lasciano stare il resto.
+ */
+function ambiente(extra: Partial<AmbienteVivo> = {}): AmbienteVivo {
+  return {
+    piattaforma: 'windows',
+    sede: 'ok',
+    sedeDescrizione: 'la distro "Regia"',
+    sedeMotivo: null,
+    sedeRimedio: null,
+    distro: 'Regia',
+    snapserver: '0.35.0',
+    snapserverVecchio: false,
+    ffmpeg: '7.1',
+    porteOccupate: [],
+    indirizzi: [],
+    controllatoIl: '2026-09-09T18:00:00Z',
+    ...extra,
+  }
+}
+
 function stato(extra: Partial<Stato> = {}): Stato {
   return {
     progettoNome: 'Casa', server: 'acceso', zone: [], altoparlanti: [], telecamere: [],
@@ -52,10 +76,7 @@ function stato(extra: Partial<Stato> = {}): Stato {
       server: { distro: 'Regia', portaControllo: 1705, portaHttp: 1780, portaFlussoClient: 1704 },
       registrazione: { cartella: 'C:/Video', minutiSegmento: 10, conAudio: false, avvisoSpazioGb: 20, bloccoSpazioGb: 5 },
     },
-    ambiente: {
-      wsl: 'ok', distro: 'Regia', snapserver: '0.35.0', ffmpeg: '7.1',
-      porteOccupate: [], indirizzi: [], controllatoIl: null,
-    },
+    ambiente: ambiente(),
     latenzaAttesaMs: 2200,
     avvisi: [],
     ...extra,
@@ -237,13 +258,151 @@ describe('il riepilogo del Setup', () => {
     const s = stato({
       suoni: [suono('s1')],
       zone: [zona('z1', { sottofondoId: 's1' })],
-      ambiente: {
-        wsl: 'ok', distro: 'R', snapserver: '0.35.0', ffmpeg: '7.1', porteOccupate: [],
+      ambiente: ambiente({
         indirizzi: [{ interfaccia: 'Wi-Fi', ip: '192.168.1.4', senzaFili: true }],
-        controllatoIl: null,
-      },
+      }),
     })
     assert.ok(riepilogoSetup(s).some((r) => /cavo/.test(r.testo)))
+  })
+})
+
+describe('il primo passo del Setup: com e messa la macchina', () => {
+  const testi = (s: Stato): string => righeAmbiente(s).map((r) => r.testo).join(' | ')
+
+  it('prima del primo controllo non dichiara niente rotto', () => {
+    // L'istantanea vuota ha ffmpeg `null` e nessun indirizzo: stampandola si
+    // accuserebbe di guasti una macchina che nessuno ha ancora guardato.
+    const righe = righeAmbiente(stato({ ambiente: ambiente({ sede: 'sconosciuta', ffmpeg: null }) }))
+    assert.equal(righe.length, 1)
+    assert.equal(righe[0]!.livello, 'info')
+    assert.doesNotMatch(righe[0]!.testo, /ffmpeg/)
+  })
+
+  it('su Windows senza WSL dice anche come installarlo', () => {
+    const s = stato({
+      ambiente: ambiente({
+        sede: 'assente',
+        sedeMotivo: 'WSL non e installato: il server audio non puo partire (ADR 0002)',
+        sedeRimedio:
+          'Apri PowerShell come amministratore, lancia "wsl --install", poi riavvia. ' +
+          'Serve anche Virtual Machine Platform, e la virtualizzazione abilitata da BIOS.',
+        snapserver: null,
+      }),
+    })
+    const righe = righeAmbiente(s)
+    assert.equal(righe[0]!.livello, 'grave')
+    assert.match(righe[0]!.testo, /WSL non e installato/)
+    assert.match(righe[0]!.testo, /wsl --install/)
+    assert.match(righe[0]!.testo, /riavvia/)
+  })
+
+  /**
+   * Il caso che si era rotto, ed e il primo avvio piu comune su Windows: WSL
+   * c'e gia -- lo hanno quasi tutti -- e manca solo la distro di Regia. Il
+   * rimedio e un menu a tendina in Impostazioni; mandare qui l'Operatore a
+   * fare `wsl --install` e a riavviare il PC vuol dire fargli perdere mezz'ora
+   * per un guasto che si risolve in tre secondi. Il rimedio arriva dal motore
+   * proprio perche di qui i due casi non si distinguono.
+   */
+  it('su Windows con WSL ma senza la distro non fa riavviare il PC per niente', () => {
+    const s = stato({
+      ambiente: ambiente({
+        sede: 'assente',
+        sedeMotivo: 'la distro "Regia" non c\'e. Distro disponibili: Ubuntu, Debian',
+        sedeRimedio:
+          "WSL c'e: scegli una delle distro disponibili in Impostazioni, oppure installa questa.",
+        distro: null,
+        snapserver: null,
+      }),
+    })
+    const righe = righeAmbiente(s)
+    assert.equal(righe[0]!.livello, 'grave')
+    assert.match(righe[0]!.testo, /Distro disponibili: Ubuntu, Debian/)
+    assert.match(righe[0]!.testo, /Impostazioni/)
+    assert.doesNotMatch(testi(s), /wsl --install|riavvia|Virtual Machine Platform/i)
+  })
+
+  it('fuori da Windows non manda nessuno a lanciare wsl --install', () => {
+    // La Sede locale non puo mancare, ma se il motivo arrivasse lo stesso il
+    // rimedio di Windows sarebbe la frase che fa perdere la serata.
+    const s = stato({
+      ambiente: ambiente({
+        piattaforma: 'linux',
+        sede: 'assente',
+        sedeDescrizione: 'questo PC',
+        sedeMotivo: 'qualcosa non va',
+        distro: null,
+        snapserver: null,
+      }),
+    })
+    assert.equal(righeAmbiente(s)[0]!.livello, 'grave')
+    assert.doesNotMatch(testi(s), /wsl --install|PowerShell|Virtual Machine Platform/i)
+  })
+
+  it('senza Sede non si lamenta anche di snapserver: non e stato guardato', () => {
+    // Un secondo allarme grave per lo stesso guasto, per giunta su una cosa
+    // che nessuno ha potuto verificare: dentro una Sede che non c'e non si
+    // guarda. Resta la riga della Sede, e quella di ffmpeg che vive a parte.
+    const s = stato({
+      ambiente: ambiente({ sede: 'assente', sedeMotivo: 'niente WSL', snapserver: null }),
+    })
+    assert.equal(righeAmbiente(s).filter((r) => r.livello === 'grave').length, 1)
+    assert.doesNotMatch(testi(s), /non si trova dove deve girare|REGIA_SNAPSERVER/)
+  })
+
+  it('con la Sede locale nomina questo PC e non parla di distro', () => {
+    const s = stato({
+      ambiente: ambiente({ piattaforma: 'linux', sedeDescrizione: 'questo PC', distro: null }),
+    })
+    assert.match(testi(s), /questo PC/)
+    assert.doesNotMatch(testi(s), /distro|WSL/i)
+  })
+
+  it('snapserver mancante dice dove non si trova e come indicarlo', () => {
+    const s = stato({
+      ambiente: ambiente({ piattaforma: 'linux', sedeDescrizione: 'questo PC', distro: null, snapserver: null }),
+    })
+    const riga = righeAmbiente(s).find((r) => /napserver/.test(r.testo))!
+    assert.equal(riga.livello, 'grave')
+    assert.match(riga.testo, /questo PC/)
+    assert.match(riga.testo, /REGIA_SNAPSERVER/)
+  })
+
+  it('una 0.27 e grave, e la riga dice perche invece di dire solo "vecchia"', () => {
+    // E il caso che il Setup esiste per prendere: parte, non da errori, e
+    // ascolta sulle porte sue. Chi legge deve capire cosa sostituire.
+    const s = stato({
+      ambiente: ambiente({
+        piattaforma: 'linux', sedeDescrizione: 'questo PC', distro: null,
+        snapserver: '0.27.0', snapserverVecchio: true,
+      }),
+    })
+    const riga = righeAmbiente(s).find((r) => /napserver/.test(r.testo))!
+    assert.equal(riga.livello, 'grave')
+    assert.match(riga.testo, /0\.33/)
+    assert.match(riga.testo, /tcp-control/)
+    assert.match(riga.testo, /0\.35/)
+  })
+
+  it('un binario che non dice la versione non passa per buono', () => {
+    const s = stato({ ambiente: ambiente({ snapserver: 'versione sconosciuta' }) })
+    const riga = righeAmbiente(s).find((r) => /napserver/.test(r.testo))!
+    assert.equal(riga.livello, 'attenzione')
+  })
+
+  it('a server acceso le porte prese sono le nostre, non un allarme', () => {
+    // Dove la Sede e locale il nostro snapserver tiene davvero quelle porte, e
+    // da qui si vedono occupate a ogni Ricontrolla.
+    const acceso = stato({
+      server: 'acceso',
+      ambiente: ambiente({ piattaforma: 'linux', sedeDescrizione: 'questo PC', distro: null, porteOccupate: [1704, 1705] }),
+    })
+    const spento = stato({
+      server: 'spento',
+      ambiente: ambiente({ piattaforma: 'linux', sedeDescrizione: 'questo PC', distro: null, porteOccupate: [1704, 1705] }),
+    })
+    assert.equal(righeAmbiente(acceso).find((r) => /Porte/.test(r.testo))!.livello, 'info')
+    assert.equal(righeAmbiente(spento).find((r) => /Porte/.test(r.testo))!.livello, 'attenzione')
   })
 })
 

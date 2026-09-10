@@ -5,7 +5,7 @@
   "description": "Controllo audio e video per casa degli orrori",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "build:engine": "tsc -p tsconfig.engine.json",
@@ -24,7 +24,9 @@
     "start": "npm run build:ui && electron .",
     "dev": "npm run build:ui && tsx src/engine/avvia.ts",
     "ffmpeg:prendi": "tsx strumenti/prendi-ffmpeg.ts",
-    "dist:win": "npm run build && electron-builder --win"
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:linux": "npm run build && electron-builder --linux",
+    "dist": "npm run build && electron-builder"
   },
   "dependencies": {
     "ws": "^8.18.0",
@@ -39,5 +41,6 @@
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
   },
-  "main": "dist/shell/shell/main.js"
+  "main": "dist/shell/shell/main.js",
+  "desktopName": "it.regia.app"
 }

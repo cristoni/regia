@@ -349,10 +349,26 @@ export class Scrittore {
     // contropressione, e la cadenza si troverebbe un secondo di audio da
     // recuperare che nessuno le ha chiesto. Questa scadenza parla di tempo
     // vero, quello in cui una socket sana si scarica in millisecondi.
+    // ⚠️ **Questa scadenza non si `unref()`**, ed e la regola del thread audio:
+    // un timer staccato dal ciclo di eventi non lo tiene vivo, e qui e l'unica
+    // cosa che lo tiene vivo. Quando la socket e parcheggiata, `attendiScarico()`
+    // e una promessa che non si risolvera mai e non trattiene niente: con la
+    // scadenza staccata, per Node non resta piu niente da fare, e il ciclo di
+    // eventi si svuota mentre lo scrittore sta ancora aspettando -- cioe
+    // esattamente il caso che questa funzione esiste per risolvere.
+    //
+    // Su Windows non si vedeva: la risoluzione dei timer e 15,6 ms, e c'e quasi
+    // sempre un altro timer in volo a tenere aperto il giro. Su Linux, dove i
+    // timer sono precisi al millisecondo, il ciclo si svuota davvero -- ed e li
+    // che e saltato fuori, con tre prove dello scrittore che finivano in
+    // «Promise resolution is still pending but the event loop has already
+    // resolved» invece di misurare cio che dovevano misurare.
+    //
+    // Tenerla attaccata non allunga la vita del processo: il `finally` qui sotto
+    // la cancella sempre, e comunque scatta entro `attesaScaricoMs`.
     let scadenza: ReturnType<typeof setTimeout> | undefined
     const scaduta = new Promise<'scaduta'>((ok) => {
       scadenza = setTimeout(() => ok('scaduta'), this.attesaScaricoMs)
-      scadenza.unref?.()
     })
     try {
       const esito = await Promise.race([d.attendiScarico().then(() => 'scaricata' as const), scaduta])

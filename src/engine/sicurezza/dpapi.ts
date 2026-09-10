@@ -16,8 +16,34 @@
  * base64 o su una cifratura fatta in casa: un file di progetto che sembra
  * contenere una password cifrata e non la contiene e peggio di uno che dice di
  * non averla.
+ *
+ * ⚠️ **Su Linux DPAPI non esiste, e non ha un equivalente.** Un portachiavi di
+ * sistema (libsecret, gnome-keyring) e un'altra cosa: vuole una sessione
+ * grafica sbloccata, non c'e su un PC che parte in kiosk, e legherebbe Regia a
+ * un demone in piu proprio la sera in cui non deve mancare niente. Quindi
+ * fuori da Windows vale la stessa dottrina scritta sopra, applicata prima
+ * ancora di provare: `dpapiDisponibile()` dice `false` subito e `cifra` e
+ * `decifra` si rifiutano. Il degrado e gia progettato -- la Telecamera
+ * funziona finche Regia resta aperta, e l'Operatore riscrive la password al
+ * prossimo avvio -- ed e la risposta giusta, non un ripiego temporaneo.
+ *
+ * Il rifiuto si dice come un fatto di sistema, non come un guasto: "powershell
+ * non trovato" manderebbe qualcuno a cercare un'installazione rotta che non
+ * c'e.
  */
 import { spawnSync } from 'node:child_process'
+
+/** Vero solo dove DPAPI puo esistere. Altrove non si prova nemmeno. */
+const SU_WINDOWS = process.platform === 'win32'
+
+/**
+ * Come si nomina l'assenza all'Operatore, senza farla sembrare un difetto.
+ *
+ * Il costruttore qui sotto la incornicia: «DPAPI non disponibile (questo non e
+ * Windows, e non esiste un equivalente): la password non e stata salvata. La
+ * Telecamera funzionera finche Regia resta aperta.»
+ */
+const NON_E_WINDOWS = 'questo non e Windows, e non esiste un equivalente'
 
 export class DpapiNonDisponibile extends Error {
   constructor(dettaglio: string) {
@@ -51,7 +77,11 @@ const PRELUDIO =
   '$in = [Console]::In.ReadToEnd().Trim(); '
 
 export function cifra(password: string): string {
+  // La password vuota prima del rifiuto: svuotare il campo di una Telecamera su
+  // Linux non e un tentativo di salvare un segreto, e non deve scrivere un
+  // avviso nel Diario ogni volta.
   if (password === '') return ''
+  if (!SU_WINDOWS) throw new DpapiNonDisponibile(NON_E_WINDOWS)
   const fuori = powershell(
     PRELUDIO +
       '$chiaro = [Text.Encoding]::UTF8.GetBytes($in); ' +
@@ -65,6 +95,11 @@ export function cifra(password: string): string {
 
 export function decifra(cifrata: string): string {
   if (cifrata === '') return ''
+  // Un `progetto.json` scritto su Windows si apre lo stesso su Linux (la
+  // versione del file resta 1): quello che non si apre e la password dentro,
+  // che era legata a quell'utente e a quel PC e li sarebbe stata illeggibile
+  // comunque.
+  if (!SU_WINDOWS) throw new DpapiNonDisponibile(NON_E_WINDOWS)
   return powershell(
     PRELUDIO +
       '$c = [Convert]::FromBase64String($in); ' +
@@ -78,6 +113,10 @@ export function decifra(cifrata: string): string {
 let disponibile: boolean | undefined
 export function dpapiDisponibile(): boolean {
   if (disponibile !== undefined) return disponibile
+  // Fuori da Windows la risposta si sa gia, e si dice: scoprirla facendo
+  // partire due `powershell` che non esistono e aspettando i loro ENOENT
+  // darebbe lo stesso `false` spacciando un fatto noto per un esperimento.
+  if (!SU_WINDOWS) return (disponibile = false)
   try {
     disponibile = decifra(cifra('prova')) === 'prova'
   } catch {

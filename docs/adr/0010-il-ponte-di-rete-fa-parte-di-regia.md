@@ -90,3 +90,51 @@ rete della distro**, non `127.0.0.1`.
 La sostanza non cambia, ed è quella che conta: l'indirizzo che snapserver riporta **non è quello
 del telefono** finché si passa dal ponte, il riconciliatore non ne soffre perché abbina per client
 id, e l'interfaccia scrive "via ponte" invece di mostrare un indirizzo falso.
+
+---
+
+## Correzione, 10 settembre 2026
+
+Su Windows questo ADR resta intero. La misura da cui nasce non è invecchiata: in
+`networkingMode=NAT` — la configurazione di un Windows di fabbrica — WSL inoltra le porte in
+ascolto **solo su `127.0.0.1`**, Windows raggiunge snapserver e il telefono no. Finché la Sede è
+una distro, il ponte serve.
+
+**Su Linux non serve e non si apre**, e la parte che conta è la seconda: non si apre **per
+scelta detta**, non perché nessuno ci abbia pensato. Snapserver ascolta già su `0.0.0.0`, che è
+la LAN: i telefoni lo raggiungono da soli, e un ponte in mezzo copierebbe ogni byte audio dentro
+il nostro processo senza far raggiungere niente a nessuno. Nel codice la cosa non è dedotta
+dall'indirizzo, è un membro della Sede — `serveIlPonte` — e il supervisore lo guarda prima di
+provarci.
+
+### Perché doveva essere una proprietà della Sede e non una deduzione
+
+Questo ADR stabilisce due regole, e la prima è: **la destinazione del ponte non può essere un
+indirizzo di loopback; se l'indirizzo non si riesce a leggere, il ponte non si apre**, e lo si
+dice nel Diario. È giusta e va tenuta. Ma su Linux l'indirizzo dei Flussi **è** `127.0.0.1`, ed
+è la risposta giusta, non un ripiego: gli inoltri fantasma di WSL, che sono l'unica ragione per
+cui il loopback lì è pericoloso, non esistono dove non c'è WSL.
+
+Un ponte che avesse ricevuto quell'indirizzo l'avrebbe rifiutato per la regola 1, e Regia
+avrebbe scritto «i telefoni potrebbero non vedere il server audio» su un sistema in cui i
+telefoni vedono tutto. Una riga di Diario falsa costa una serata a chi la legge. Da qui la
+separazione fra l'indirizzo e il bisogno del ponte, spiegata per esteso nell'
+[ADR 0011](0011-dove-gira-snapserver-e-una-sede-non-un-if.md).
+
+La regola 2 — **una `connect()` che riesce non prova che dall'altra parte ci sia snapserver** —
+vale invece dappertutto, e su Linux guadagna perfino un caso nuovo. Lì la cosa che risponde
+senza essere nostra non è un ponte che gira a vuoto: è un `snapserver.service` di sistema, che a
+`Server.GetStatus` risponde davvero e bene. La prova non è più nemmeno «qualcuno ha risposto»,
+è «ha risposto e ha i nostri Flussi».
+
+### Il prezzo che sparisce insieme al ponte
+
+La sezione «Cosa si paga» descrive un costo che su Linux **non si paga**. Non passando da nessun
+ponte, snapserver vede ogni client al suo indirizzo vero: `AltoparlanteVivo.indirizzo` torna
+utilizzabile, un telefono a `192.168.1.7` compare come `192.168.1.7`, e la scritta "via ponte"
+nell'interfaccia non compare mai. Chi fa il Setup su Linux può quindi usare l'indirizzo mostrato
+accanto a un Altoparlante per capire quale telefono è, cosa che su Windows non si può fare.
+
+È l'unica cosa che il porting aggiunge invece di togliere, ed è bene ricordarsene quando si
+guarda uno schermo Windows e ci si chiede perché quel campo sia inutile: non è rotto, è il
+prezzo del ponte.

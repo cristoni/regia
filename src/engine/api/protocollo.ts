@@ -307,10 +307,43 @@ export interface SuonoVivo {
  * che non mostrare niente.
  */
 export interface AmbienteVivo {
-  readonly wsl: 'ok' | 'assente' | 'senza distro' | 'sconosciuto'
+  /**
+   * Su cosa gira il **motore**, che non e detto sia il sistema di chi guarda:
+   * `--rete` serve l'interfaccia vera via HTTP, e il tablet della Fase 3 e un
+   * secondo client che puo essere qualunque cosa. L'interfaccia non puo
+   * dedurre la piattaforma dal proprio ambiente: gliela dice il motore.
+   */
+  readonly piattaforma: 'windows' | 'linux' | 'altro'
+  /**
+   * La **Sede** del server audio: la distro WSL su Windows, il PC stesso su
+   * Linux. `assente` vuol dire che non c'e da girarci dentro -- non che manchi
+   * snapserver, che e la domanda dopo.
+   */
+  readonly sede: 'ok' | 'assente' | 'sconosciuta'
+  /** Come nominarla: «la distro "Ubuntu"», «questo PC». */
+  readonly sedeDescrizione: string
+  /** Perche la Sede non va, in parole. `null` se va. */
+  readonly sedeMotivo: string | null
+  /**
+   * Cosa puo farci l'Operatore, quando c'e qualcosa da fare.
+   *
+   * Lo decide il motore e non l'interfaccia, perche il rimedio dipende dalla
+   * diagnosi e i due casi si somigliano da fuori: "WSL non c'e" si rimedia con
+   * `wsl --install`, la virtualizzazione da BIOS e un riavvio; "WSL c'e ma non
+   * quella distro" si rimedia con un menu a tendina in Impostazioni. Dare il
+   * primo consiglio al secondo caso vuol dire far riavviare il PC per niente.
+   */
+  readonly sedeRimedio: string | null
+  /** Il nome della distro WSL, o `null` dove non c'e nessuna distro. */
   readonly distro: string | null
-  /** Versione trovata dentro la distro, o `null` se snapserver non c'e. */
+  /** Versione trovata dentro la Sede, o `null` se snapserver non c'e. */
   readonly snapserver: string | null
+  /**
+   * Vero se quella versione e precedente alla 0.33, dove `[tcp]` e diventata
+   * `[tcp-control]`: leggerebbe meta della nostra configurazione ignorandola
+   * in silenzio. Succede con l'apt di Ubuntu, che si ferma alla 0.27.
+   */
+  readonly snapserverVecchio: boolean
   readonly ffmpeg: string | null
   readonly porteOccupate: readonly number[]
   readonly indirizzi: readonly {

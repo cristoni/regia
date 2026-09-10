@@ -2,10 +2,14 @@
  * Il supervisore: tiene in piedi snapserver e lo tiene somigliante al progetto.
  *
  * Mette insieme quattro cose che da sole non servirebbero a niente: il processo
- * dentro la distro WSL, il ponte di rete che lo rende raggiungibile dai
- * telefoni, la connessione JSON-RPC, e il riconciliatore -- che e una funzione
- * pura e ha bisogno di qualcuno che gli porti lo stato osservato e applichi le
- * azioni.
+ * dentro la Sede, il ponte di rete che lo rende raggiungibile dai telefoni --
+ * dove serve --, la connessione JSON-RPC, e il riconciliatore, che e una
+ * funzione pura e ha bisogno di qualcuno che gli porti lo stato osservato e
+ * applichi le azioni.
+ *
+ * Dove giri snapserver non e affar suo: lo sa la Sede (`sede.ts`), che su
+ * Windows e una distro WSL e su Linux e il PC stesso. Qui dentro non c'e
+ * nessun `wsl.exe` e nessun `process.platform`.
  *
  * Il principio e sempre quello dell'ADR 0005: **il file di progetto e la
  * verita, Snapcast e una proiezione**. Qui non si prende nessuna decisione di
@@ -26,14 +30,12 @@ import { latenzaAttesaMs } from '../dominio/progetto.js'
 import type { StatoServer } from '../api/protocollo.js'
 import { Ponte } from '../rete/ponte.js'
 import {
-  BINARIO_SNAPSERVER,
-  CARTELLA_DISTRO,
-  distroInstallate,
-  eseguiNellaDistroAsync,
-  indirizzoDistro,
-  scriviNellaDistro,
-} from './distro.js'
-import { generaConfigurazione } from './configurazione.js'
+  sedeDi,
+  versioneTroppoVecchia,
+  VERSIONE_MINIMA_SNAPSERVER,
+  type Sede,
+} from './sede.js'
+import { generaConfigurazione, OPZIONI_CONFIGURAZIONE } from './configurazione.js'
 import { ClientRpc, OPZIONI_RPC } from './rpc.js'
 import { pianifica, type Azione, type StatoOsservato } from './riconciliatore.js'
 
@@ -56,15 +58,24 @@ export interface OpzioniSupervisore {
    */
   readonly suonaIdentifica: (chiaveFlusso: string) => number
   /**
-   * L'indirizzo della distro e cambiato (o si e saputo per la prima volta).
+   * L'indirizzo dei Flussi e cambiato (o si e saputo per la prima volta).
    *
-   * Serve al thread audio: gli scrittori devono aprire le socket verso la
-   * distro, non verso `127.0.0.1`, dove gli inoltri di WSL sopravvivono al
-   * processo che ascoltava e accettano byte che nessuno leggera.
+   * Serve al thread audio: e li che gli scrittori aprono le tredici socket
+   * delle sorgenti. Su Windows e l'indirizzo della distro, e **non**
+   * `127.0.0.1`, dove gli inoltri di WSL sopravvivono al processo che
+   * ascoltava e accettano byte che nessuno leggera. Su Linux e `127.0.0.1`,
+   * e li e giusto: quel meccanismo di inoltri non esiste.
    */
-  readonly suIndirizzoDistro: (ip: string) => void
+  readonly suIndirizzoFlussi: (ip: string) => void
   /** Ogni quanto si ri-afferma il progetto sul server. */
   readonly cadenzaRiconciliazioneMs?: number
+  /**
+   * Dove gira snapserver. Iniettabile, e non per gusto di astrazione: senza,
+   * il collaudo di "il server non puo partire" dipenderebbe da cosa c'e
+   * installato sulla macchina che esegue i test -- su un Linux con snapserver
+   * nel PATH quel test **avvierebbe un server vero**.
+   */
+  readonly sede?: () => Sede
 }
 
 /** Millisecondi fra un tentativo di riconnessione RPC e il successivo. */
@@ -91,7 +102,7 @@ export class SupervisoreSnapcast extends EventEmitter {
   private identificazione: string | null = null
   private fermatoDaNoi = false
   private chiuso = false
-  private ipDistro: string | null = null
+  private ipFlussi: string | null = null
 
   constructor(private readonly opzioni: OpzioniSupervisore) {
     super()
@@ -144,10 +155,37 @@ export class SupervisoreSnapcast extends EventEmitter {
    * apposta per sopravvivere alla chiusura di Regia, quindi riaprendo l'app
    * il piu delle volte e ancora li. Riavviarlo sarebbe due secondi di silenzio
    * gratuiti.
+   *
+   * ⚠️ **Si adotta solo un server che ha i nostri Flussi.** Dentro la distro
+   * dedicata dell'ADR 0003 l'unico snapserver acceso e per forza il nostro; su
+   * Linux no -- molte distribuzioni impacchettano `snapserver.service`, che
+   * parte da solo e risponde a `Server.GetStatus` come risponderebbe il
+   * nostro. Adottarlo vuol dire dichiararsi accesi e poi riempire il Diario di
+   * "Stream not found" per tutta la serata, perche gli stream li crea il file
+   * di configurazione e quello e il suo. Se gli stream non sono i nostri non
+   * si adotta: `avvia()` fara il suo lavoro, e dira anche di chi e la colpa.
    */
   async adotta(): Promise<boolean> {
     try {
-      await this.collegaEVerifica()
+      await this.collegaEVerifica(false)
+      const nostri = generaConfigurazione(this.opzioni.progetto()).flussi.map((f) => f.id)
+      const suoi = new Set(this.osservato.streamIds)
+      const mancanti = nostri.filter((id) => !suoi.has(id))
+      if (mancanti.length > 0) {
+        this.opzioni.suDiario(
+          'attenzione',
+          `C'e gia un server audio acceso, ma non e il nostro: non ha i Flussi ` +
+            `${mancanti.slice(0, 3).join(', ')}${mancanti.length > 3 ? '…' : ''}. ` +
+            'Non lo adotto: avviero il nostro.',
+        )
+        // `collegaEVerifica` si era gia dichiarato acceso: qui non lo siamo,
+        // e lasciarlo cosi farebbe saltare l'`avvia()` che viene dopo.
+        this.situazione = 'spento'
+        throw new Error('il server acceso non ha i Flussi di questo progetto')
+      }
+      // E nostro: adesso si puo riconciliare, cosa che `collegaEVerifica` non
+      // ha fatto apposta.
+      void this.riconcilia('appena adottato')
       this.avviaBattito()
       await this.apriPonte()
       return true
@@ -165,30 +203,59 @@ export class SupervisoreSnapcast extends EventEmitter {
     this.fermatoDaNoi = false
     this.situazione = 'in avvio'
 
-    const distro = p.server.distro
-    const installate = distroInstallate()
-    if (installate === null) {
+    const sede = this.sede()
+
+    const manca = await sede.indisponibile()
+    if (manca) {
       this.situazione = 'non installato'
-      throw new Error('WSL non e installato: il server audio non puo partire (ADR 0002)')
+      // Il rimedio finisce nel messaggio: chi legge questo errore e l'Operatore
+      // in Setup, e il §8.1 vuole che ci arrivi senza aprire un terminale a
+      // cercare cosa voglia dire.
+      throw new Error(manca.rimedio ? `${manca.motivo}. ${manca.rimedio}` : manca.motivo)
     }
-    if (!installate.includes(distro)) {
+
+    // Il binario si cerca **prima** di scrivere la configurazione: se non c'e,
+    // o se e troppo vecchio per il file che sappiamo scrivere, il posto in cui
+    // dirlo e qui -- non a meta serata, quando i telefoni non si collegano e il
+    // log del server non ha nessun errore.
+    const snapserver = await sede.snapserver()
+    if (!snapserver) {
       this.situazione = 'non installato'
       throw new Error(
-        `la distro "${distro}" non c'e. Distro disponibili: ${installate.join(', ') || 'nessuna'}`,
+        `snapserver non si trova in ${sede.descrizione}: il server audio non puo partire. ` +
+          'Installalo, oppure indica il binario in REGIA_SNAPSERVER.',
+      )
+    }
+    if (versioneTroppoVecchia(snapserver.versione)) {
+      this.situazione = 'non installato'
+      throw new Error(
+        `snapserver ${snapserver.versione} e troppo vecchio (serve almeno ` +
+          `${VERSIONE_MINIMA_SNAPSERVER}): da 0.33 la sezione [tcp] si chiama [tcp-control], ` +
+          'e una versione precedente ignorerebbe in silenzio meta della configurazione.',
       )
     }
 
-    const conf = generaConfigurazione(p)
-    const scritto = scriviNellaDistro(distro, `${CARTELLA_DISTRO}/snapserver.conf`, conf.testo)
+    // Il `datadir` viene dalla Sede e non dal default: `/var/lib/snapserver` va
+    // bene solo dove i comandi girano come root, cioe dentro la distro. Su
+    // Linux Regia e l'utente che ha fatto login, e li non puo scrivere.
+    const conf = generaConfigurazione(p, { ...OPZIONI_CONFIGURAZIONE, datadir: sede.datadir })
+    const scritto = await sede.scrivi(`${sede.cartellaLavoro}/snapserver.conf`, conf.testo)
     if (scritto.stato !== 0) {
       this.situazione = 'caduto'
-      throw new Error(`non riesco a scrivere la configurazione nella distro: ${scritto.errore}`)
+      throw new Error(
+        `non riesco a scrivere la configurazione in ${sede.descrizione}: ${scritto.errore}`,
+      )
     }
 
     // `pkill -x`, sul nome esatto: `pkill -f <percorso>` ucciderebbe anche la
     // shell che lo esegue, perche il percorso compare nella sua riga di comando,
     // e tutto cio che viene dopo non succederebbe, in silenzio.
-    await eseguiNellaDistroAsync(distro, 'pkill -x snapserver || true')
+    //
+    // Su Linux questo `pkill` gira come l'utente, non come root: non tocca --
+    // e non deve toccare -- uno snapserver di sistema avviato da systemd sotto
+    // un altro utente. Quello va spento da chi l'ha acceso, e `avvia()` lo dira
+    // guardando chi tiene la porta di controllo.
+    await sede.esegui('pkill -x snapserver || true')
 
     // Tre cose in queste sei righe, e ognuna e costata.
     //
@@ -203,16 +270,15 @@ export class SupervisoreSnapcast extends EventEmitter {
     // 3. Si **verifica**. Un `echo avviato` dice solo che la shell e arrivata
     //    in fondo. `pgrep` dice che snapserver c'e, e se non c'e si porta
     //    indietro il suo log invece di lasciare all'Operatore un "non risponde".
-    const avvio = await eseguiNellaDistroAsync(
-      distro,
+    const avvio = await sede.esegui(
       [
-        `mkdir -p ${CARTELLA_DISTRO}`,
-        `setsid ${BINARIO_SNAPSERVER} -c ${CARTELLA_DISTRO}/snapserver.conf ` +
-          `> ${CARTELLA_DISTRO}/server.log 2>&1 < /dev/null &`,
+        `mkdir -p ${sede.cartellaLavoro} ${sede.datadir}`,
+        `setsid "${snapserver.percorso}" -c ${sede.cartellaLavoro}/snapserver.conf ` +
+          `> ${sede.cartellaLavoro}/server.log 2>&1 < /dev/null &`,
         'disown',
         'sleep 1',
         'if pgrep -x snapserver > /dev/null; then echo avviato; else',
-        `  echo "non partito"; tail -20 ${CARTELLA_DISTRO}/server.log 2>&1; exit 1`,
+        `  echo "non partito"; tail -20 ${sede.cartellaLavoro}/server.log 2>&1; exit 1`,
         'fi',
       ].join('\n'),
       { timeoutMs: 25_000 },
@@ -220,7 +286,8 @@ export class SupervisoreSnapcast extends EventEmitter {
     if (avvio.stato !== 0 || !avvio.uscita.includes('avviato')) {
       this.situazione = 'caduto'
       throw new Error(
-        `snapserver non e partito: ${avvio.uscita || avvio.errore || 'nessun dettaglio'}`,
+        `snapserver non e partito: ${avvio.uscita || avvio.errore || 'nessun dettaglio'}` +
+          (await this.colpaDiUnAltroServer(sede)),
       )
     }
 
@@ -239,8 +306,7 @@ export class SupervisoreSnapcast extends EventEmitter {
     this.fermaBattito()
     await this.rpc.chiudi()
     await this.ponte.chiudi()
-    const distro = this.opzioni.progetto().server.distro
-    await eseguiNellaDistroAsync(distro, 'pkill -x snapserver || true')
+    await this.sede().esegui('pkill -x snapserver || true')
     this.situazione = 'spento'
     this.vivi.clear()
     this.osservato = { gruppi: [], clienti: [], streamIds: [] }
@@ -377,22 +443,28 @@ export class SupervisoreSnapcast extends EventEmitter {
   }
 
   /**
-   * Apre il ponte verso l'IP **della distro**, non verso il loopback.
+   * Apre il ponte verso l'IP della Sede -- **quando serve**.
    *
-   * `0.0.0.0` contiene `127.0.0.1`: un ponte che inoltrasse li si collegherebbe
-   * a se stesso, e il giro a vuoto che ne esce accetta connessioni all'istante
-   * senza rispondere mai -- indistinguibile da un server acceso, per chi guarda
-   * solo `connect()`. Se l'indirizzo della distro non si riesce a leggere, il
-   * ponte non si apre: meglio dei telefoni che non si collegano che dei
-   * telefoni collegati a niente.
+   * Su Linux non serve, e non aprirlo non e una rinuncia: snapserver ascolta
+   * gia su `0.0.0.0` e i telefoni lo raggiungono da soli. Il ponte in mezzo
+   * copierebbe ogni byte audio dentro il nostro processo per niente.
+   *
+   * Su Windows serve, e la destinazione e l'IP **della distro**, non il
+   * loopback: `0.0.0.0` contiene `127.0.0.1`, quindi un ponte che inoltrasse
+   * li si collegherebbe a se stesso, e il giro a vuoto che ne esce accetta
+   * connessioni all'istante senza rispondere mai -- indistinguibile da un
+   * server acceso, per chi guarda solo `connect()`. Se l'indirizzo non si
+   * riesce a leggere, il ponte non si apre: meglio dei telefoni che non si
+   * collegano che dei telefoni collegati a niente.
    */
   private async apriPonte(): Promise<void> {
-    const ip = await this.aggiornaIndirizzoDistro()
+    const ip = await this.aggiornaIndirizzoFlussi()
+    if (!this.sede().serveIlPonte) return
     if (!ip) {
       this.opzioni.suDiario(
         'attenzione',
-        "Non riesco a leggere l'indirizzo della distro: il ponte di rete resta chiuso, " +
-          'e i telefoni potrebbero non vedere il server audio.',
+        `Non riesco a leggere l'indirizzo di ${this.sede().descrizione}: il ponte di rete ` +
+          'resta chiuso, e i telefoni potrebbero non vedere il server audio.',
       )
       return
     }
@@ -400,22 +472,53 @@ export class SupervisoreSnapcast extends EventEmitter {
   }
 
   /**
-   * Rilegge l'indirizzo della distro e lo comunica se e cambiato.
+   * Rilegge l'indirizzo dei Flussi e lo comunica se e cambiato.
    *
-   * Cambia a ogni riavvio della distro, e non e un dettaglio cosmetico: e
-   * l'indirizzo a cui il thread audio apre le tredici socket delle sorgenti.
+   * Non e un dettaglio cosmetico: e l'indirizzo a cui il thread audio apre le
+   * tredici socket delle sorgenti. Su Windows cambia a ogni riavvio della
+   * distro; su Linux e sempre `127.0.0.1`, e allora questa e una conferma che
+   * costa niente.
    */
-  async aggiornaIndirizzoDistro(): Promise<string | null> {
-    const ip = await indirizzoDistro(this.opzioni.progetto().server.distro)
-    if (ip && ip !== this.ipDistro) {
-      this.ipDistro = ip
-      this.opzioni.suIndirizzoDistro(ip)
+  async aggiornaIndirizzoFlussi(): Promise<string | null> {
+    const ip = await this.sede().indirizzoFlussi()
+    if (ip && ip !== this.ipFlussi) {
+      this.ipFlussi = ip
+      this.opzioni.suIndirizzoFlussi(ip)
     }
     return ip
   }
 
   get indirizzo(): string | null {
-    return this.ipDistro
+    return this.ipFlussi
+  }
+
+  /** La Sede di adesso: il progetto puo cambiare la distro sotto i piedi. */
+  private sede(): Sede {
+    return this.opzioni.sede?.() ?? sedeDi(this.opzioni.progetto().server)
+  }
+
+  /**
+   * Quando l'avvio fallisce, prova a dire **chi tiene la porta**.
+   *
+   * Su Linux e il fallimento piu probabile alla prima accensione, e il piu
+   * difficile da capire da soli: molte distribuzioni impacchettano
+   * `snapserver.service`, che parte da solo, gira sotto un altro utente --
+   * quindi il nostro `pkill` non lo tocca -- e tiene 1704, 1705 e 1780. Dal
+   * log si vede solo un "address already in use" senza un nome.
+   *
+   * Se non si riesce a chiedere, non si inventa niente: si restituisce la
+   * stringa vuota e l'errore resta quello che era.
+   */
+  private async colpaDiUnAltroServer(sede: Sede): Promise<string> {
+    const r = await sede
+      .esegui('systemctl is-active snapserver 2>/dev/null || true', { timeoutMs: 5000 })
+      .catch(() => null)
+    if (!r || !/^active$/m.test(r.uscita.trim())) return ''
+    return (
+      '. Attenzione: su questa macchina c\'e un servizio "snapserver" gia attivo ' +
+      '(systemd), che tiene le porte e non e nostro: fermalo con ' +
+      '"sudo systemctl stop snapserver", e disabilitalo se non lo vuoi al prossimo avvio.'
+    )
   }
 
   /**
@@ -427,7 +530,14 @@ export class SupervisoreSnapcast extends EventEmitter {
    * gira a vuoto. L'unica prova e una risposta: `Server.GetStatus` con dentro
    * gli stream che ci aspettiamo.
    */
-  private async collegaEVerifica(): Promise<void> {
+  /**
+   * @param poiRiconcilia Falso solo per `adotta()`, che dopo essersi collegato
+   *   deve ancora decidere **se quel server e nostro**. Riconciliare prima di
+   *   quella decisione lancerebbe una passata contro un server che stiamo per
+   *   mollare, e la sua chiusura la farebbe fallire: una riga "Riconciliazione
+   *   fallita" nel Diario per una cosa che abbiamo voluto noi.
+   */
+  private async collegaEVerifica(poiRiconcilia = true): Promise<void> {
     await this.rpc.collega()
     this.osservato = await this.rpc.stato()
     this.aggiornaVivi()
@@ -437,7 +547,7 @@ export class SupervisoreSnapcast extends EventEmitter {
       `Collegato al server audio: ${this.osservato.streamIds.length} Flussi, ` +
         `${this.osservato.clienti.length} client conosciuti.`,
     )
-    void this.riconcilia('appena collegati')
+    if (poiRiconcilia) void this.riconcilia('appena collegati')
   }
 
   private avviaBattito(): void {

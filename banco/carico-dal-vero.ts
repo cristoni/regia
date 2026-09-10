@@ -14,15 +14,19 @@
  *
  * Presuppone: banco preparato, snapserver acceso con Ingresso/Cantina/Soffitta.
  *
- * `HOST_FLUSSI` dice dove mandare le sorgenti. Va messo all'indirizzo della
- * distro (`wsl hostname -I`), non lasciato su `127.0.0.1`: gli inoltri che WSL
- * crea su loopback **sopravvivono al processo che ascoltava**, quindi contro un
- * server morto la `connect()` riesce lo stesso e il banco misurerebbe un Flusso
- * perfetto dentro un fantasma (ADR 0010).
+ * Dove mandare le sorgenti lo dice la Sede, e non e piu una cosa da ricordarsi
+ * a mano. Su Windows e l'indirizzo della distro e **non** `127.0.0.1`: gli
+ * inoltri che WSL crea su loopback sopravvivono al processo che ascoltava,
+ * quindi contro un server morto la `connect()` riesce lo stesso e il banco
+ * misurerebbe un Flusso perfetto dentro un fantasma (ADR 0010). Su Linux e
+ * `127.0.0.1`, e li e la risposta giusta: nessun WSL, nessun inoltro, e
+ * snapserver ascolta su `0.0.0.0`. `HOST_FLUSSI` resta e vince su tutto, per
+ * puntare il banco a un server su un'altra macchina.
  */
 import { progettoVuoto, type Zona } from '../src/engine/dominio/progetto.ts'
 import { MotoreAudio } from '../src/engine/audio/motore-audio.ts'
 import { flussiDi } from '../src/engine/snapcast/configurazione.ts'
+import { indirizzoFlussi } from './sede-banco.ts'
 
 const secondi = Number(process.argv[2] ?? 30)
 const conCarico = !process.argv.includes('--senza-carico')
@@ -42,16 +46,19 @@ const audio = new MotoreAudio({ suDiario: (l, t) => diario.push(`[${l}] ${t}`) }
 await audio.aspettaPronto()
 
 // L'host e il primo argomento da quando le sorgenti vanno all'indirizzo della
-// distro e non a `127.0.0.1` (ADR 0010). Qui il banco parla al server locale.
+// Sede e non per forza a `127.0.0.1` (ADR 0010). Chi risponde e la Sede stessa:
+// un ripiego scritto qui a mano sarebbe giusto su un sistema e una bugia
+// sull'altro.
+const host = await indirizzoFlussi()
 audio.configura(
-  process.env.HOST_FLUSSI ?? '127.0.0.1',
+  host,
   progetto.audio,
   flussi.map((f) => ({ id: f.id, zonaId: f.zonaId, porta: f.porta, volume: 1 })),
 )
 audio.avvia()
 
 console.log(
-  `${flussi.length} Flussi, ${secondi} s, carico sul thread principale: ` +
+  `${flussi.length} Flussi verso ${host}, ${secondi} s, carico sul thread principale: ` +
     `${conCarico ? 'SI' : 'no'}\n`,
 )
 

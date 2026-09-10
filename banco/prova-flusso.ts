@@ -14,6 +14,7 @@ import { PresaTcp } from '../src/engine/audio/presa-tcp.ts'
 import { Scrittore } from '../src/engine/audio/scrittore.ts'
 import { flussiDi } from '../src/engine/snapcast/configurazione.ts'
 import { ClientRpc } from '../src/engine/snapcast/rpc.ts'
+import { indirizzoFlussi } from './sede-banco.ts'
 
 const secondi = Number(process.argv[2] ?? 12)
 const NOMI_ZONE = ['Ingresso', 'Cantina', 'Soffitta']
@@ -38,6 +39,15 @@ function tono(hz: number) {
   return campionato('tono', c, audio.canali)
 }
 
+/**
+ * L'indirizzo delle sorgenti lo chiede alla Sede: l'IP della distro su Windows
+ * (ADR 0010, mai il loopback), `127.0.0.1` su Linux. Qui conta il doppio, perche
+ * questo script esiste per distinguere "snapserver legge" da "il kernel ha
+ * accettato la connessione": partendo dal loopback di Windows si misurerebbe un
+ * inoltro fantasma e si crederebbe di aver provato qualcosa.
+ */
+const host = await indirizzoFlussi()
+
 const rpc = new ClientRpc()
 await rpc.collega()
 
@@ -59,13 +69,13 @@ const scrittori = flussi.map((f, i) => {
     scrittore: new Scrittore({
       impostazioni: audio,
       mixer,
-      collega: () => PresaTcp.apri('127.0.0.1', f.porta),
+      collega: () => PresaTcp.apri(host, f.porta),
       suDiagnostica: (m) => console.error(`   [${f.id}] ${m}`),
     }),
   }
 })
 
-console.log(`\nScrivo per ${secondi} s su ${flussi.length} sorgenti...`)
+console.log(`\nScrivo per ${secondi} s su ${flussi.length} sorgenti di ${host}...`)
 for (const s of scrittori) s.scrittore.avvia()
 
 await new Promise((r) => setTimeout(r, 3000))

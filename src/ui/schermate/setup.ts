@@ -7,18 +7,24 @@
  *
  * Due punti in cui questa schermata dice qualcosa di scomodo invece di tacere:
  *
- *  - **Il §8.1 non e raggiungibile come e scritto.** "PC pulito → server acceso
- *    in meno di 15 minuti, senza terminale" non tiene: WSL2 richiede Virtual
- *    Machine Platform, un riavvio, e la virtualizzazione abilitata da BIOS.
- *    Qui si dice cosa manca e cosa serve fare, invece di lasciare l'Operatore
- *    davanti a un errore.
- *  - **Il rilevamento automatico via mDNS non esiste.** Avahi non e compilato
- *    su Windows. L'indirizzo scritto a mano non e un ripiego: e la strada.
+ *  - **Il §8.1 non e raggiungibile come e scritto**, e non lo e su nessuno dei
+ *    due sistemi. "PC pulito → server acceso in meno di 15 minuti, senza
+ *    terminale" non tiene su Windows, dove WSL2 vuole Virtual Machine Platform,
+ *    la virtualizzazione abilitata da BIOS e un riavvio (ADR 0003); e non tiene
+ *    su Linux, dove la Sede c'e gia ma snapserver no, e l'`apt install
+ *    snapserver` che verrebbe da fare porta la 0.27.0 di Ubuntu 24.04 -- che
+ *    parte senza un errore e ascolta sulle porte sbagliate. Qui si dice cosa
+ *    manca e cosa serve fare, invece di lasciare l'Operatore davanti a un
+ *    errore; o, nel caso peggiore che e quello di Linux, davanti a nessuno.
+ *  - **Il rilevamento automatico via mDNS non esiste per Regia.** Su Windows
+ *    avahi non e nemmeno compilato (ADR 0002); ovunque, la configurazione che
+ *    generiamo dice `mdns_enabled = false`. L'indirizzo scritto a mano non e
+ *    un ripiego: e la strada.
  */
 import type { Stato } from '../../engine/api/protocollo'
 import { Elenco, classe, el, testo, type Voce } from '../nucleo/dom'
 import type { Contesto, Schermata } from '../nucleo/schermata'
-import { ora, riepilogoSetup } from '../nucleo/viste'
+import { ora, riepilogoSetup, righeAmbiente } from '../nucleo/viste'
 
 export class Setup implements Schermata {
   readonly elemento = el('section', {})
@@ -88,9 +94,12 @@ export class Setup implements Schermata {
       el('p', {
         class: 'nota',
         testo:
-          'Il rilevamento automatico via mDNS non e disponibile: avahi non e compilato su Windows, ' +
-          'e da WSL il multicast verso la LAN non e affidabile. L\'indirizzo va scritto a mano. ' +
-          'Il QR con l\'indirizzo e previsto per la Fase 2.',
+          'Il rilevamento automatico via mDNS non e disponibile: la configurazione che Regia ' +
+          'genera tiene "mdns_enabled = false", su tutti e due i sistemi. Su Windows non ci ' +
+          'sarebbe scelta -- avahi non e compilato, e da WSL il multicast verso la LAN non e ' +
+          'affidabile. Su Linux avahi ci sarebbe, ma nessuno l\'ha provato e l\'indirizzo ' +
+          'scritto a mano e l\'unica strada verificata: resta quella. Il QR con l\'indirizzo ' +
+          'e previsto per la Fase 2.',
       }),
     )
 
@@ -164,57 +173,15 @@ export class Setup implements Schermata {
       a.controllatoIl ? `controllato alle ${ora(a.controllatoIl)}` : 'mai controllato',
     )
 
-    const righe: { livello: 'info' | 'attenzione' | 'grave'; testo: string }[] = []
-    if (a.wsl === 'assente') {
-      righe.push({
-        livello: 'grave',
-        testo:
-          'WSL non e installato. Serve per il server audio, e la sua installazione richiede ' +
-          'Virtual Machine Platform e un riavvio di Windows: apri PowerShell come amministratore ' +
-          'e lancia "wsl --install", poi riavvia.',
-      })
-    } else if (a.wsl === 'senza distro') {
-      righe.push({
-        livello: 'grave',
-        testo: `WSL c'e, ma la distro "${a.distro}" no. Cambiala nelle Impostazioni o installala.`,
-      })
-    } else if (a.wsl === 'ok') {
-      righe.push({ livello: 'info', testo: `Distro WSL "${a.distro}": presente.` })
-    }
-
-    righe.push(
-      a.snapserver
-        ? { livello: 'info', testo: `Snapserver ${a.snapserver} trovato nella distro.` }
-        : {
-            livello: 'grave',
-            testo: 'Snapserver non e nella distro: senza, nessun telefono puo suonare.',
-          },
-    )
-    righe.push(
-      a.ffmpeg
-        ? { livello: a.ffmpeg.includes('PATH') ? 'attenzione' : 'info', testo: `ffmpeg: ${a.ffmpeg}` }
-        : { livello: 'attenzione', testo: 'ffmpeg non trovato: la registrazione non funzionera.' },
-    )
-    if (a.porteOccupate.length > 0) {
-      righe.push({
-        livello: 'attenzione',
-        testo: `Porte gia occupate: ${a.porteOccupate.join(', ')}. Se e il server audio di una ` +
-          'sessione precedente va bene; altrimenti qualcosa le sta usando.',
-      })
-    }
-    const soloSenzaFili =
-      a.indirizzi.length > 0 && a.indirizzi.every((i) => i.senzaFili)
-    if (soloSenzaFili) {
-      righe.push({
-        livello: 'attenzione',
-        testo:
-          'Il PC e collegato solo via Wi-Fi. Otto Altoparlanti in PCM stereo sono 11,3 Mbit/s ' +
-          'continui, piu il video: collega il PC via cavo e tieni i telefoni sul 5 GHz.',
-      })
-    }
-    this.mostra(this.ambiente, righe)
-    classe(this.passoAmbiente, 'fatto', a.wsl === 'ok' && a.snapserver !== null)
-    classe(this.passoAmbiente, 'rotto', a.wsl !== 'ok' || a.snapserver === null)
+    this.mostra(this.ambiente, righeAmbiente(stato))
+    // Una versione di snapserver troppo vecchia conta come rotto quanto la sua
+    // assenza: parte, non da errori, e ascolta sulle porte sbagliate. Il passo
+    // resta rosso finche non e stata sostituita.
+    const ambienteAPosto = a.sede === 'ok' && a.snapserver !== null && !a.snapserverVecchio
+    classe(this.passoAmbiente, 'fatto', ambienteAPosto)
+    // Non "rotto" per esclusione: prima del primo controllo non si sa niente, e
+    // un passo rosso all'apertura direbbe una cosa che nessuno ha guardato.
+    classe(this.passoAmbiente, 'rotto', a.sede !== 'sconosciuta' && !ambienteAPosto)
 
     this.mostra(this.statoServer, [
       stato.server === 'acceso'

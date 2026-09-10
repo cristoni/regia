@@ -1,6 +1,6 @@
 # Regia
 
-Applicazione Windows con cui un operatore, da un solo PC e da una stanza nascosta, guarda
+Applicazione con cui un operatore, da un solo PC e da una stanza nascosta, guarda
 le stanze di una casa degli orrori e ci fa partire dentro dei suoni al momento giusto.
 Tutto su rete locale, senza internet.
 
@@ -120,9 +120,18 @@ importato, uno STOP TUTTO. È diverso dagli **Avvisi**, che sono le poche cose a
 e stanno nella barra di stato.
 _Evita_: log, cronologia, eventi
 
+**Sede**:
+La macchina, vera o virtuale, dove gira il server audio. Su un PC Windows è una macchina
+virtuale che vive dentro il PC; su un PC Linux è il PC stesso. È l'unico posto in cui quella
+differenza si vede: tutto il resto di Regia parla alla Sede e non sa com'è fatta. L'Operatore
+non la nomina quasi mai — compare nel Setup quando manca, e nei messaggi che dicono dove una
+cosa non si è potuta scrivere.
+_Evita_: distro, WSL, host, ambiente
+
 **Ponte**:
-Il passaggio che Regia apre da sé perché i telefoni raggiungano il server audio quando WSL
-espone le porte solo sul PC. Si accende da solo se serve e resta invisibile — tranne in un punto:
+Il passaggio che Regia apre da sé perché i telefoni raggiungano il server audio quando la Sede
+espone le porte solo sul PC. Si accende da solo se serve — e dove non serve non si apre affatto,
+che è la condizione normale quando la Sede è il PC stesso. Resta invisibile tranne in un punto:
 un Altoparlante che passa dal Ponte non mostra il proprio indirizzo, ma la parola "via ponte".
 _Evita_: proxy, tunnel, forward
 

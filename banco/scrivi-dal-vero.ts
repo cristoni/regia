@@ -16,24 +16,13 @@
  * Presuppone: banco preparato (`npx tsx banco/prepara.ts`), server acceso con le
  * Zone volute, Altoparlanti finti avviati (`npx tsx banco/altoparlanti-finti.ts 4`).
  */
-import { spawnSync } from 'node:child_process'
-
 import { progettoVuoto, type Zona } from '../src/engine/dominio/progetto.ts'
 import { campionato, MixerZona } from '../src/engine/audio/mixer.ts'
 import { PresaTcp } from '../src/engine/audio/presa-tcp.ts'
 import { Scrittore } from '../src/engine/audio/scrittore.ts'
 import { flussiDi } from '../src/engine/snapcast/configurazione.ts'
 import { ClientRpc } from '../src/engine/snapcast/rpc.ts'
-
-const DISTRO = process.env['REGIA_DISTRO'] ?? 'Ubuntu'
-const CARTELLA_LOG = '/tmp/regia/finti'
-
-function wsl(comando: string): string {
-  const r = spawnSync('wsl', ['-d', DISTRO, '-u', 'root', '-e', 'bash', '-lc', comando], {
-    encoding: 'utf8', windowsHide: true, maxBuffer: 1 << 24,
-  })
-  return (r.stdout ?? '').replace(/\u0000/g, '').trim()
-}
+import { CARTELLA_LOG, indirizzoFlussi, nellaSede } from './sede-banco.ts'
 
 const argomenti = process.argv.slice(2)
 const secondi = Number(argomenti[0] ?? 60)
@@ -52,25 +41,32 @@ function tono(secondiDurata: number, frequenza: number, canali: number, hz = 110
   return campionato('tono', c, canali)
 }
 
-/** Grandezze di risincronizzazione dai log degli Altoparlanti finti. */
-function risincronizzazioni(): number[] {
-  const testo = wsl(`grep -ihoP "resync[^0-9-]*\\K-?[0-9.]+" ${CARTELLA_LOG}/*.log 2>/dev/null || true`)
+/**
+ * Grandezze di risincronizzazione dai log degli Altoparlanti finti.
+ *
+ * I log stanno **dentro la Sede** e da li si leggono: nella distro su Windows,
+ * in una cartella di questo PC su Linux. Il banco non deve saperlo.
+ */
+async function risincronizzazioni(): Promise<number[]> {
+  const testo = await nellaSede(
+    `grep -ihoP "resync[^0-9-]*\\K-?[0-9.]+" ${CARTELLA_LOG}/*.log 2>/dev/null || true`,
+  )
   return testo
     ? testo.split('\n').map((r) => Math.abs(Number(r))).filter((n) => !Number.isNaN(n))
     : []
 }
 
 /** Chunk che il client non e riuscito a suonare: sono buchi udibili. */
-function chunkFalliti(): number {
-  const n = wsl(
+async function chunkFalliti(): Promise<number> {
+  const n = await nellaSede(
     `cat ${CARTELLA_LOG}/*.log 2>/dev/null | grep -c "Failed to get chunk\\|No chunks available" || echo 0`,
   )
   return Number(n) || 0
 }
 
 /** I client tengono il file aperto: si svuota con `:>`, non si tronca. */
-function svuotaLog(): void {
-  wsl(`for f in ${CARTELLA_LOG}/*.log; do :> "$f"; done 2>/dev/null || true`)
+async function svuotaLog(): Promise<void> {
+  await nellaSede(`for f in ${CARTELLA_LOG}/*.log; do :> "$f"; done 2>/dev/null || true`)
 }
 
 function percentile(valori: number[], p: number): number {
@@ -90,6 +86,13 @@ progetto.zone = NOMI_ZONE.map(
 )
 const flussi = flussiDi(progetto)
 
+/**
+ * L'indirizzo delle sorgenti lo dice la Sede, non questo file: la distro su
+ * Windows -- mai il loopback, ADR 0010 -- e `127.0.0.1` su Linux, dove il
+ * loopback e la risposta giusta e non un ripiego. `HOST_FLUSSI` vince su tutto.
+ */
+const host = await indirizzoFlussi()
+
 const rpc = new ClientRpc()
 await rpc.collega()
 const stato = await rpc.stato()
@@ -98,7 +101,7 @@ if (stato.clienti.length === 0) {
   console.log('Nessun Altoparlante finto: avviali con  npx tsx banco/altoparlanti-finti.ts 4')
 }
 console.log(
-  `Scrivo su ${flussi.length} sorgenti (${flussi.map((f) => f.porta).join(', ')}), ` +
+  `Scrivo su ${flussi.length} sorgenti di ${host} (${flussi.map((f) => f.porta).join(', ')}), ` +
     `${secondi} s per ogni valore di anticipo.\n`,
 )
 
@@ -107,7 +110,7 @@ console.log('---------|---------|---------------------------------|-------------
 
 for (const anticipo of anticipi) {
   const audio = { ...progetto.audio, anticipoMs: anticipo }
-  svuotaLog()
+  await svuotaLog()
 
   const scrittori = flussi.map((f) => {
     const mixer = new MixerZona(audio)
@@ -115,7 +118,7 @@ for (const anticipo of anticipi) {
     return new Scrittore({
       impostazioni: audio,
       mixer,
-      collega: () => PresaTcp.apri('127.0.0.1', f.porta),
+      collega: () => PresaTcp.apri(host, f.porta),
       suDiagnostica: (m) => {
         if (/caduta/.test(m)) console.error(`   [${f.id}] ${m}`)
       },
@@ -128,8 +131,8 @@ for (const anticipo of anticipi) {
   const diagnostiche = scrittori.map((s) => s.diagnostica())
   for (const s of scrittori) await s.ferma()
 
-  const resync = risincronizzazioni()
-  const falliti = chunkFalliti()
+  const resync = await risincronizzazioni()
+  const falliti = await chunkFalliti()
   const scartoMedio = Math.round(
     diagnostiche.reduce((n, d) => n + d.scartoMs, 0) / diagnostiche.length,
   )
