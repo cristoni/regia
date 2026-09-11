@@ -16,7 +16,28 @@ import http from 'node:http'
 import { describe, it } from 'node:test'
 
 import { progettoVuoto, type Telecamera } from '../dominio/progetto.js'
-import { GestoreTelecamere } from './gestore.js'
+import { GestoreTelecamere, fpsVisibile } from './gestore.js'
+
+describe('fps in anteprima: mostra il misurato, decade a 0 sullo stallo', () => {
+  it('mostra l fps pubblicato mentre i fotogrammi arrivano', () => {
+    // Ultimo fotogramma 200 ms fa: lo stream scorre, si mostra il valore vero.
+    assert.equal(fpsVisibile(24, 10_000, 10_200), 24)
+  })
+  it('non ricopia uno 0 di passaggio: e compito del chiamante non passare il parziale', () => {
+    // Il fix vive qui: il chiamante passa `fpsPubblicato` (24), non il contatore
+    // vivo (che a meta finestra puo essere 0). Con l ultimo fotogramma recente,
+    // 24 resta 24 anche se il giro di /info.json capita subito dopo un azzeramento.
+    assert.equal(fpsVisibile(24, 10_150, 10_200), 24)
+  })
+  it('decade a 0 quando lo stream smette di consegnare', () => {
+    // Nessun fotogramma da oltre la soglia (2,5 s): non si resta congelati a 24.
+    assert.equal(fpsVisibile(24, 5_000, 10_200), 0)
+  })
+  it('al confine esatto della soglia non e ancora scaduto', () => {
+    assert.equal(fpsVisibile(30, 0, 2500), 30)
+    assert.equal(fpsVisibile(30, 0, 2501), 0)
+  })
+})
 
 interface Finto {
   porta: number

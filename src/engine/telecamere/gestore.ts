@@ -68,6 +68,27 @@ const RIPROVA_FLUSSO_MS = 2000
  * un flusso che non sta piu arrivando.
  */
 const VALIDITA_IDR_MS = 3000
+/**
+ * Oltre questo silenzio di fotogrammi, l'fps mostrato decade a 0 invece di
+ * restare congelato all'ultimo valore. Piu lungo della finestra di misura (1 s)
+ * cosi un normale intervallo fra due misure non lo fa sfarfallare a 0; piu corto
+ * dei 3 s con cui l'anteprima copre la cella, cosi il numero e gia zero quando
+ * il riquadro diventa nero.
+ */
+const FPS_STALLO_MS = 2500
+
+/**
+ * L'fps da mostrare in anteprima: quello misurato, o 0 se lo stream ha smesso
+ * di consegnare fotogrammi.
+ *
+ * Puro, e collaudato in `viste.test`-style, perche e l'unico punto dell'fps in
+ * cui si puo sbagliare: senza la soglia, uno stream fermo mostrerebbe per sempre
+ * l'ultimo fps misurato (il giro di `/info.json` lo ricopia identico ogni 3 s),
+ * e l'Operatore vedrebbe "24 fps" su una cella che non si aggiorna piu.
+ */
+export function fpsVisibile(fpsPubblicato: number, ultimoFotogrammaIl: number, ora: number): number {
+  return ora - ultimoFotogrammaIl > FPS_STALLO_MS ? 0 : fpsPubblicato
+}
 
 interface Sessione {
   flusso: FlussoAperto | null
@@ -78,6 +99,10 @@ interface Sessione {
   ultimoIdrIl: number
   fotogrammiNelSecondo: number
   ultimaMisura: number
+  /** L'ultimo fps calcolato sulla finestra di misura: e questo che si mostra. */
+  fpsPubblicato: number
+  /** Quando e arrivato l'ultimo fotogramma. Oltre `FPS_STALLO_MS` l'fps va a 0. */
+  ultimoFotogrammaIl: number
   riprova: NodeJS.Timeout | null
 }
 
@@ -387,7 +412,13 @@ export class GestoreTelecamere {
         raggiungibile: true,
         batteria: info.batteria,
         segnale: info.segnale,
-        fpsAnteprima: sessione ? sessione.fotogrammiNelSecondo : null,
+        // NON il contatore vivo: quello e un parziale a meta finestra, spesso 0
+        // subito dopo un azzeramento, e ricopiarlo qui ogni 3 s faceva
+        // sfarfallare l'anteprima a "0 fps" su uno stream perfettamente sano. Si
+        // mostra l'ultimo fps misurato, che decade a 0 solo se lo stream si ferma.
+        fpsAnteprima: sessione
+          ? fpsVisibile(sessione.fpsPubblicato, sessione.ultimoFotogrammaIl, Date.now())
+          : null,
         vistoIl: new Date().toISOString(),
         dettagli: {
           torcia: info.torcia,
@@ -428,12 +459,15 @@ export class GestoreTelecamere {
           sessione.ultimoIdrIl = Date.now()
         }
         sessione.fotogrammiNelSecondo++
+        sessione.ultimoFotogrammaIl = Date.now()
         this.opzioni.suFotogramma(t.id, chiave, unita)
       }),
       ultimoIdr: null,
       ultimoIdrIl: 0,
       fotogrammiNelSecondo: 0,
       ultimaMisura: Date.now(),
+      fpsPubblicato: 0,
+      ultimoFotogrammaIl: Date.now(),
       riprova: null,
     }
     this.sessioni.set(t.id, sessione)
@@ -461,10 +495,14 @@ export class GestoreTelecamere {
         const ascoltatori = this.ascoltatoriByte.get(t.id)
         if (ascoltatori) for (const a of ascoltatori) a.byte(d)
         const ora = Date.now()
-        if (ora - sessione.ultimaMisura >= 1000) {
+        const trascorso = ora - sessione.ultimaMisura
+        if (trascorso >= 1000) {
+          // fps sulla finestra EFFETTIVA, non sul nominale di 1 s: una consegna
+          // a raffiche che arriva dopo 1,4 s non deve leggersi come 1 s di conteggio.
+          sessione.fpsPubblicato = Math.round((sessione.fotogrammiNelSecondo * 1000) / trascorso)
           const vista = this.viste.get(t.id)
           if (vista) {
-            this.viste.set(t.id, { ...vista, fpsAnteprima: sessione.fotogrammiNelSecondo })
+            this.viste.set(t.id, { ...vista, fpsAnteprima: sessione.fpsPubblicato })
           }
           sessione.fotogrammiNelSecondo = 0
           sessione.ultimaMisura = ora
