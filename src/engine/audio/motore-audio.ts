@@ -9,10 +9,11 @@
 import { Worker } from 'node:worker_threads'
 
 import type { ImpostazioniAudio } from '../dominio/progetto.js'
+import type { Livello } from '../api/protocollo.js'
 import type { ComandoAudio, EventoAudio, FlussoDaServire, StatoFlusso } from './protocollo-audio.js'
 
 export interface OpzioniMotoreAudio {
-  readonly suDiario: (livello: 'info' | 'attenzione' | 'grave', testo: string) => void
+  readonly suDiario: (livello: Livello, testo: string) => void
 }
 
 /**

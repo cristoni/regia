@@ -19,7 +19,7 @@
  * che un telefono ha perso il Wi-Fi (§8.8).
  */
 import type { Progetto, Telecamera } from '../dominio/progetto.js'
-import type { TelecameraViva } from '../api/protocollo.js'
+import type { Livello, TelecameraViva } from '../api/protocollo.js'
 import { indirizziLocali, virtuale } from '../ambiente.js'
 import { SpezzatoreAnnexB } from './annexb.js'
 import {
@@ -52,7 +52,7 @@ export interface TelecameraVivaInterna {
 
 export interface OpzioniGestore {
   readonly progetto: () => Progetto
-  readonly suDiario: (livello: 'info' | 'attenzione' | 'grave', testo: string) => void
+  readonly suDiario: (livello: Livello, testo: string) => void
   readonly suFotogramma: (telecameraId: string, chiave: boolean, dati: Uint8Array) => void
   /** Restituisce la password in chiaro per una Telecamera, o `null`. */
   readonly password: (t: Telecamera) => string | null

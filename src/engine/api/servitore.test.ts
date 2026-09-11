@@ -6,6 +6,7 @@ import { after, describe, it } from 'node:test'
 
 import { WebSocket } from 'ws'
 
+import { latenzaAttesaMs, progettoVuoto } from '../dominio/progetto.js'
 import { impacchettaVideo, spacchettaVideo, type Comando, type Evento, type Stato } from './protocollo.js'
 import { OPZIONI_PREDEFINITE, Servitore, type Motore } from './servitore.js'
 
@@ -15,18 +16,28 @@ after(async () => {
 })
 
 function statoFinto(nome = 'Casa degli orrori'): Stato {
+  const p = progettoVuoto('C:/Video')
   return {
     progettoNome: nome,
     server: 'acceso',
     zone: [], altoparlanti: [], telecamere: [], suoni: [], avvisi: [],
     registrazione: { attive: 0, spazioLiberoGb: 100, sottoAvviso: false, bloccata: false, cartella: 'C:/Video' },
     audio: { bufferMs: 2000, codec: 'pcm', bandaMbit: 0 },
+    impostazioni: { audio: p.audio, server: p.server, registrazione: p.registrazione },
+    ambiente: {
+      piattaforma: 'windows', sede: 'sconosciuta', sedeDescrizione: '', sedeMotivo: null,
+      sedeRimedio: null, distro: null, snapserver: null, snapserverVecchio: false,
+      ffmpeg: null, porteOccupate: [], indirizzi: [], controllatoIl: null,
+    },
+    latenzaAttesaMs: latenzaAttesaMs(p.audio),
   }
 }
 
 class MotoreFinto implements Motore {
   eseguiti: Comando[] = []
   daFallire: string | null = null
+  suoniImportati: { nome: string; byte: number }[] = []
+  progettoImportato: string | null = null
   private nome = 'Casa degli orrori'
   private video: ((id: string, chiave: boolean, d: Uint8Array) => void)[] = []
   private diario: ((e: Extract<Evento, { tipo: 'diario' }>) => void)[] = []
@@ -46,6 +57,24 @@ class MotoreFinto implements Motore {
   ascoltaDiario(a: (e: Extract<Evento, { tipo: 'diario' }>) => void): () => void {
     this.diario.push(a)
     return () => (this.diario = this.diario.filter((x) => x !== a))
+  }
+  interessatoVideo(): void {}
+  ultimoIdr(): Uint8Array | null {
+    return null
+  }
+  async elencoRegistrazioni(): Promise<readonly unknown[]> {
+    return []
+  }
+  async importaSuono(nome: string, dati: Buffer): Promise<void> {
+    if (this.daFallire) throw new Error(this.daFallire)
+    this.suoniImportati.push({ nome, byte: dati.length })
+  }
+  async esportaProgetto(): Promise<string> {
+    return '{"nome":"finto"}'
+  }
+  async importaProgettoDaTesto(testo: string): Promise<void> {
+    if (this.daFallire) throw new Error(this.daFallire)
+    this.progettoImportato = testo
   }
   emettiVideo(id: string, chiave: boolean, d: Uint8Array): void {
     for (const a of this.video) a(id, chiave, d)
@@ -92,8 +121,8 @@ class Client {
     this.ws.send(s)
   }
 
-  async aspetta<T extends Evento>(prova: (e: Evento) => e is T, entro = 2000): Promise<T>
-  async aspetta(prova: (e: Evento) => boolean, entro = 2000): Promise<Evento>
+  async aspetta<T extends Evento>(prova: (e: Evento) => e is T, entro?: number): Promise<T>
+  async aspetta(prova: (e: Evento) => boolean, entro?: number): Promise<Evento>
   async aspetta(prova: (e: Evento) => boolean, entro = 2000): Promise<Evento> {
     const scadenza = Date.now() + entro
     for (;;) {
@@ -300,5 +329,30 @@ describe('servitore: diario e file', () => {
     const { porta } = await avvia()
     const r = await fetch(`http://127.0.0.1:${porta}/salute`)
     assert.deepEqual(await r.json(), { ok: true, clienti: 0 })
+  })
+
+  it('importa un Suono via POST, e un fallimento del motore diventa un 400', async () => {
+    const { motore, porta } = await avvia()
+    const ok = await fetch(`http://127.0.0.1:${porta}/api/suoni?nome=urlo.wav`, {
+      method: 'POST',
+      body: new Uint8Array([1, 2, 3]),
+    })
+    assert.equal(ok.status, 200)
+    assert.deepEqual(motore.suoniImportati, [{ nome: 'urlo.wav', byte: 3 }])
+
+    motore.daFallire = 'file non valido'
+    const male = await fetch(`http://127.0.0.1:${porta}/api/suoni?nome=x`, { method: 'POST', body: 'x' })
+    assert.equal(male.status, 400)
+    assert.deepEqual(await male.json(), { errore: 'file non valido' })
+  })
+
+  it('esporta e importa il progetto via /api/progetto', async () => {
+    const { motore, porta } = await avvia()
+    const esporta = await fetch(`http://127.0.0.1:${porta}/api/progetto`)
+    assert.equal(await esporta.text(), '{"nome":"finto"}')
+
+    const importa = await fetch(`http://127.0.0.1:${porta}/api/progetto`, { method: 'POST', body: '{"v":1}' })
+    assert.equal(importa.status, 200)
+    assert.equal(motore.progettoImportato, '{"v":1}')
   })
 })

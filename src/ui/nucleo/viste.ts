@@ -131,7 +131,10 @@ export function colonneGriglia(quante: number): number {
 
 // ------------------------------------------------------------ diagnostica
 
-export type Livello = 'info' | 'attenzione' | 'grave'
+// Il tipo vive nel contratto (`api/protocollo.ts`): qui si ri-esporta perche le
+// schermate lo hanno sempre importato da questo modulo.
+export type { Livello } from '../../engine/api/protocollo'
+import type { Livello } from '../../engine/api/protocollo'
 
 export interface Salute {
   readonly livello: Livello

@@ -14,6 +14,7 @@
 import * as fs from 'node:fs/promises'
 
 import { BYTE_PER_CAMPIONE, type ImpostazioniAudio } from '../dominio/progetto.js'
+import type { Livello } from '../api/protocollo.js'
 import { campionato, MixerZona, type Campionato } from './mixer.js'
 import { PresaTcp } from './presa-tcp.js'
 import { Scrittore, type Destinazione } from './scrittore.js'
@@ -139,7 +140,7 @@ export class GestoreAudio {
     return this.serviti.find((s) => s.flusso.zonaId === zonaId)
   }
 
-  private diario(livello: 'info' | 'attenzione' | 'grave', testo: string): void {
+  private diario(livello: Livello, testo: string): void {
     this.emetti({ tipo: 'diario', livello, testo })
   }
 

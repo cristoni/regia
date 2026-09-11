@@ -31,13 +31,14 @@ import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 
 import type { Progetto } from '../dominio/progetto.js'
+import type { Livello } from '../api/protocollo.js'
 import { trovaFfmpeg } from '../media/ffmpeg.js'
 import { CANALI_AUDIO, FREQUENZA_AUDIO, PompaAudio } from './pompa-audio.js'
 import type { GestoreTelecamere } from '../telecamere/gestore.js'
 
 export interface OpzioniRegistratore {
   readonly progetto: () => Progetto
-  readonly suDiario: (livello: 'info' | 'attenzione' | 'grave', testo: string) => void
+  readonly suDiario: (livello: Livello, testo: string) => void
   readonly telecamere: GestoreTelecamere
 }
 

@@ -2,6 +2,11 @@
  * Questi test lanciano ffmpeg per davvero. Non e un test di unita puro, ed e
  * voluto: il pezzo che deve funzionare e proprio l'interfaccia con ffmpeg, e
  * simularla proverebbe soltanto che il simulatore e d'accordo con se stesso.
+ *
+ * Si collauda `assicura`, perche e la strada che il prodotto percorre: i
+ * campioni li legge il thread audio dal `.pcm`, e qui si fa lo stesso --
+ * leggere il file dal percorso restituito e l'unico modo onesto di verificare
+ * cosa il thread audio trovera.
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -51,21 +56,27 @@ function suonoDiProva(file: string): Suono {
   }
 }
 
+/** I campioni come li leggera il thread audio: dal file, come Int16 little endian. */
+async function campioniDi(percorso: string): Promise<Int16Array> {
+  const dati = await fs.readFile(percorso)
+  return new Int16Array(dati.buffer.slice(dati.byteOffset, dati.byteOffset + dati.byteLength))
+}
+
 describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponibile' }, () => {
   it('decodifica nel formato del progetto e misura la durata vera', async (t) => {
     if (!disponibileFfmpeg) return t.skip('ffmpeg non disponibile')
     const a = await ambiente()
     generaTono(path.join(a.suoni, 'tono.wav'), 2)
 
-    const esito = await a.libreria.prepara(suonoDiProva('tono.wav'), AUDIO)
+    const esito = await a.libreria.assicura(suonoDiProva('tono.wav'), AUDIO)
     assert.equal(esito.convertito, true)
     // Due secondi a 44100 Hz, con la tolleranza di un blocco di codifica.
     assert.ok(Math.abs(esito.durataMs - 2000) < 60, `durata misurata: ${esito.durataMs} ms`)
-    assert.equal(esito.campionato.campioni.length, esito.campionato.durata * AUDIO.canali)
-    assert.ok(
-      esito.campionato.campioni.some((x) => x !== 0),
-      'il PCM decodificato e tutto zeri',
-    )
+
+    const campioni = await campioniDi(esito.percorso)
+    const attesi = Math.round((esito.durataMs / 1000) * AUDIO.frequenza) * AUDIO.canali
+    assert.equal(campioni.length, attesi, 'la durata dichiarata e i byte sul disco devono coincidere')
+    assert.ok(campioni.some((x) => x !== 0), 'il PCM decodificato e tutto zeri')
   })
 
   it('la seconda volta non riconverte', async (t) => {
@@ -74,8 +85,8 @@ describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponi
     generaTono(path.join(a.suoni, 'tono.wav'), 1)
     const suono = suonoDiProva('tono.wav')
 
-    assert.equal((await a.libreria.prepara(suono, AUDIO)).convertito, true)
-    assert.equal((await a.libreria.prepara(suono, AUDIO)).convertito, false)
+    assert.equal((await a.libreria.assicura(suono, AUDIO)).convertito, true)
+    assert.equal((await a.libreria.assicura(suono, AUDIO)).convertito, false)
   })
 
   it('cambiare formato audio invalida la cache da solo', async (t) => {
@@ -84,11 +95,13 @@ describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponi
     generaTono(path.join(a.suoni, 'tono.wav'), 1)
     const suono = suonoDiProva('tono.wav')
 
-    const stereo = await a.libreria.prepara(suono, AUDIO)
-    const mono = await a.libreria.prepara(suono, { ...AUDIO, canali: 1 })
+    const stereo = await a.libreria.assicura(suono, AUDIO)
+    const mono = await a.libreria.assicura(suono, { ...AUDIO, canali: 1 })
 
     assert.equal(mono.convertito, true, 'passando a mono doveva riconvertire')
-    assert.equal(mono.campionato.campioni.length, stereo.campionato.campioni.length / 2)
+    const campioniStereo = await campioniDi(stereo.percorso)
+    const campioniMono = await campioniDi(mono.percorso)
+    assert.equal(campioniMono.length, campioniStereo.length / 2)
     // Stessa durata in secondi, meta campioni: e proprio cosi che mono dimezza la banda.
     assert.ok(Math.abs(mono.durataMs - stereo.durataMs) < 5)
   })
@@ -99,7 +112,7 @@ describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponi
     await fs.writeFile(path.join(a.suoni, 'rotto.mp3'), 'non sono un mp3')
 
     await assert.rejects(
-      () => a.libreria.prepara(suonoDiProva('rotto.mp3'), AUDIO),
+      () => a.libreria.assicura(suonoDiProva('rotto.mp3'), AUDIO),
       (e: unknown) => e instanceof ErroreDecodifica && /rotto\.mp3/.test(e.message),
     )
   })
@@ -108,7 +121,7 @@ describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponi
     if (!disponibileFfmpeg) return t.skip('ffmpeg non disponibile')
     const a = await ambiente()
     await fs.writeFile(path.join(a.suoni, 'rotto.wav'), 'spazzatura')
-    await assert.rejects(() => a.libreria.prepara(suonoDiProva('rotto.wav'), AUDIO))
+    await assert.rejects(() => a.libreria.assicura(suonoDiProva('rotto.wav'), AUDIO))
 
     const inCache = await fs.readdir(a.cache).catch(() => [])
     assert.deepEqual(inCache, [], `residui in cache: ${inCache.join(', ')}`)
@@ -120,7 +133,7 @@ describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponi
     generaTono(path.join(a.suoni, 'buono.wav'), 1)
     await fs.writeFile(path.join(a.suoni, 'rotto.wav'), 'spazzatura')
 
-    const esito = await a.libreria.preparaTutti(
+    const esito = await a.libreria.assicuraTutti(
       [
         { ...suonoDiProva('rotto.wav'), id: 's-rotto' },
         { ...suonoDiProva('buono.wav'), id: 's-buono' },
@@ -128,10 +141,10 @@ describe('libreria dei Suoni', { skip: !disponibileFfmpeg && 'ffmpeg non disponi
       AUDIO,
     )
 
-    assert.equal(esito.pronti, 1)
+    assert.equal(esito.pronti.length, 1)
+    assert.equal(esito.pronti[0]!.suono.id, 's-buono')
+    assert.ok(esito.pronti[0]!.percorso.endsWith('.pcm'))
     assert.equal(esito.errori.length, 1)
-    assert.ok(a.libreria.ottieni('s-buono'), 'il Suono buono deve essere in memoria')
-    assert.equal(a.libreria.ottieni('s-rotto'), undefined)
   })
 
   it('importando due file omonimi ma diversi non ne perde uno', async (t) => {

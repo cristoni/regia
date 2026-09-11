@@ -465,14 +465,16 @@ describe('scrittore: fermarsi mentre si sta collegando', () => {
     const audio = { ...AUDIO }
     const mixer = new MixerZona(audio)
     const prese: Presa[] = []
-    let sbloccaCollegamento: (() => void) | null = null
+    // Dentro un oggetto e non in una `let`: l'assegnazione avviene solo nella
+    // chiusura, e il narrowing del compilatore ridurrebbe la variabile a `never`.
+    const sblocca: { collegamento: (() => void) | null } = { collegamento: null }
 
     const scrittore = new Scrittore({
       impostazioni: audio,
       mixer,
       // Un collegamento lento a comando: cosi `ferma()` arriva mentre e in volo.
       collega: async () => {
-        await new Promise<void>((r) => (sbloccaCollegamento = r))
+        await new Promise<void>((r) => (sblocca.collegamento = r))
         const p = new Presa()
         prese.push(p)
         return p
@@ -482,10 +484,10 @@ describe('scrittore: fermarsi mentre si sta collegando', () => {
 
     scrittore.avvia()
     // Si aspetta che il ciclo sia davvero dentro `collega()`.
-    while (!sbloccaCollegamento) await new Promise((r) => setImmediate(r))
+    while (!sblocca.collegamento) await new Promise((r) => setImmediate(r))
 
     const fermata = scrittore.ferma()
-    sbloccaCollegamento()
+    sblocca.collegamento()
     await fermata
 
     assert.equal(prese.length, 1, 'il collegamento in volo doveva completarsi')

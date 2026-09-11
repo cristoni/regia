@@ -21,6 +21,12 @@ import type {
   ImpostazioniServer,
 } from '../dominio/progetto.js'
 
+/**
+ * I livelli del Diario e degli avvisi. `grave` e cio che interrompe la serata,
+ * `attenzione` cio che va guardato, `info` il racconto di quel che succede.
+ */
+export type Livello = 'info' | 'attenzione' | 'grave'
+
 // ------------------------------------------------------------- Comandi
 
 const conZona = { zonaId: z.string() }
@@ -377,7 +383,7 @@ export interface Stato {
   /** Latenza attesa fra pressione e suono: `bufferMs + anticipoMs` (§8.3). */
   readonly latenzaAttesaMs: number
   /** Avvisi persistenti da mostrare nella barra di stato (§3.10). */
-  readonly avvisi: readonly { readonly livello: 'info' | 'attenzione' | 'grave'; readonly testo: string }[]
+  readonly avvisi: readonly { readonly livello: Livello; readonly testo: string }[]
 }
 
 // -------------------------------------------------------------- Eventi
@@ -387,7 +393,7 @@ export type Evento =
   | { readonly tipo: 'esito'; readonly id: string; readonly ok: true }
   | { readonly tipo: 'esito'; readonly id: string; readonly ok: false; readonly errore: string }
   /** Riga di diario leggibile dall'Operatore (§3.10). */
-  | { readonly tipo: 'diario'; readonly quando: string; readonly livello: 'info' | 'attenzione' | 'grave'; readonly testo: string }
+  | { readonly tipo: 'diario'; readonly quando: string; readonly livello: Livello; readonly testo: string }
   /** Un fotogramma sta per arrivare sul canale binario. */
   | { readonly tipo: 'video.inizio'; readonly telecameraId: string; readonly larghezza: number; readonly altezza: number }
   | { readonly tipo: 'video.fine'; readonly telecameraId: string; readonly motivo: string }

@@ -21,7 +21,7 @@
  *    generiamo dice `mdns_enabled = false`. L'indirizzo scritto a mano non e
  *    un ripiego: e la strada.
  */
-import type { Stato } from '../../engine/api/protocollo'
+import type { Livello, Stato } from '../../engine/api/protocollo'
 import { Elenco, classe, el, testo, type Voce } from '../nucleo/dom'
 import type { Contesto, Schermata } from '../nucleo/schermata'
 import { ora, riepilogoSetup, righeAmbiente } from '../nucleo/viste'
@@ -248,7 +248,7 @@ export class Setup implements Schermata {
 
   private mostra(
     dove: HTMLElement,
-    righe: readonly { livello: 'info' | 'attenzione' | 'grave'; testo: string }[],
+    righe: readonly { livello: Livello; testo: string }[],
   ): void {
     // Questi elenchi cambiano solo quando cambia l'ambiente, cioe quasi mai:
     // ricostruirli e piu semplice che tenerli allineati, e non c'e niente

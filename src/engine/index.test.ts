@@ -16,7 +16,9 @@ import { after, before, describe, it } from 'node:test'
 import { WebSocket } from 'ws'
 
 import type { Evento, Stato } from './api/protocollo.js'
-import { avviaMotore, type MotoreAvviato } from './index.js'
+import type { Progetto, Suono, Zona } from './dominio/progetto.js'
+import { progettoVuoto } from './dominio/progetto.js'
+import { avviaMotore, MotoreRegia, type MotoreAvviato } from './index.js'
 
 const daPulire: Array<() => Promise<void>> = []
 let ffmpegDisponibile = false
@@ -277,6 +279,116 @@ describe('motore: ripartenza', () => {
     assert.equal(
       await fs.readFile(path.join(cartella, 'progetto.json'), 'utf8'),
       '{"versione":1,"nome":"x"}',
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// L'importazione con un Suono che non si carica. Qui il thread audio e finto,
+// e non per comodita: contro il worker vero non c'e modo di far fallire
+// `caricaSuono` DOPO una decodifica riuscita, che e esattamente il caso in cui
+// la vecchia `importa()` esplodeva a meta col progetto gia sostituito.
+
+function zona(id: string, sottofondoId: string | null, ordine: number): Zona {
+  return { id, nome: `Zona ${id}`, colore: '#112233', ordine, volume: 1, sottofondoId, suoniAbilitati: null }
+}
+function suono(id: string, ordine: number): Suono {
+  return {
+    id, nome: `Suono ${id}`, file: `${id}.wav`, colore: '#cc0000', categoria: null,
+    guadagno: 1, durataMs: null, tastoRapido: null, ordine,
+  }
+}
+
+class AudioFinto {
+  caricati: string[] = []
+  scaricati: string[] = []
+  sottofondi: { zonaId: string; suonoId: string | null }[] = []
+  readonly daFallire = new Set<string>()
+
+  configura(): void {}
+  suona(): void {}
+  volume(): void {}
+  stopZona(): void {}
+  stopTutto(): void {}
+  statoDi(): undefined {
+    return undefined
+  }
+  scaricaSuono(suonoId: string): void {
+    this.scaricati.push(suonoId)
+  }
+  sottofondo(zonaId: string, suonoId: string | null): void {
+    this.sottofondi.push({ zonaId, suonoId })
+  }
+  async caricaSuono(suonoId: string): Promise<number> {
+    if (this.daFallire.has(suonoId)) throw new Error('cache illeggibile')
+    this.caricati.push(suonoId)
+    return 1000
+  }
+}
+
+const libreriaFinta = {
+  async importa(): Promise<string> {
+    throw new Error('non usato in questo test')
+  },
+  async assicura(): Promise<{ percorso: string; durataMs: number; convertito: boolean }> {
+    throw new Error('non usato in questo test')
+  },
+  async assicuraTutti(suoni: readonly Suono[]) {
+    return {
+      pronti: suoni.map((s) => ({ suono: s, percorso: `${s.id}.pcm`, durataMs: 1000 })),
+      errori: [],
+    }
+  },
+}
+
+describe('motore: importazione con un Suono che non si carica', () => {
+  it('degrada per Suono invece di lasciare il progetto a meta', async () => {
+    const primo: Progetto = { ...progettoVuoto('x'), zone: [zona('z1', 's1', 0)], suoni: [suono('s1', 0)] }
+    const audio = new AudioFinto()
+    const motore = new MotoreRegia(primo, { programmaSalvataggio: () => {} }, libreriaFinta, audio)
+    daPulire.push(() => motore.chiudi())
+    const diario: string[] = []
+    motore.ascoltaDiario((e) => diario.push(`${e.livello}: ${e.testo}`))
+
+    // L'avvio carica s1 e fa partire il suo Sottofondo, come farebbe avviaMotore.
+    await motore.caricaSuoniEAvviaSottofondi()
+    assert.deepEqual(audio.caricati, ['s1'])
+    assert.deepEqual(audio.sottofondi, [{ zonaId: 'z1', suonoId: 's1' }])
+
+    // Il progetto nuovo riusa l'id s1 (file diverso) e aggiunge s2; il
+    // caricamento di s1 fallira DOPO una decodifica riuscita.
+    const secondo: Progetto = {
+      ...progettoVuoto('x'),
+      nome: 'Evento nuovo',
+      zone: [zona('z1', 's1', 0), zona('z2', 's2', 1)],
+      suoni: [{ ...suono('s1', 0), file: 'altro.wav' }, suono('s2', 1)],
+    }
+    const percorso = path.join(os.tmpdir(), `regia-importa-${Date.now()}.json`)
+    daPulire.push(() => fs.rm(percorso, { force: true }))
+    await fs.writeFile(percorso, JSON.stringify(secondo), 'utf8')
+
+    audio.caricati = []
+    audio.sottofondi = []
+    audio.daFallire.add('s1')
+    // Il comando riesce: il fallimento di un Suono e una riga di Diario, non
+    // un'importazione a meta.
+    await motore.esegui({ tipo: 'progetto.importa', percorso })
+
+    // I campioni del progetto vecchio sono stati scaricati prima di caricare i
+    // nuovi: e cio che impedisce all's1 vecchio di suonare al posto del nuovo.
+    assert.deepEqual(audio.scaricati, ['s1'])
+    assert.deepEqual(audio.caricati, ['s2'], 's2 doveva caricarsi nonostante s1')
+    assert.ok(diario.some((r) => r.startsWith('attenzione:') && r.includes('non caricato')))
+
+    // Il Sottofondo riparte solo dove il Suono e davvero in memoria adesso.
+    assert.deepEqual(audio.sottofondi, [{ zonaId: 'z2', suonoId: 's2' }])
+
+    const s = motore.stato()
+    assert.equal(s.progettoNome, 'Evento nuovo')
+    assert.deepEqual(
+      s.suoni.map((x) => [x.id, x.pronto]),
+      [['s1', false], ['s2', true]],
+      's1 non e pronto e la schermata deve poterlo dire',
     )
   })
 })

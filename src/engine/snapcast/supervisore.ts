@@ -27,7 +27,7 @@ import { EventEmitter } from 'node:events'
 
 import type { Progetto } from '../dominio/progetto.js'
 import { latenzaAttesaMs } from '../dominio/progetto.js'
-import type { StatoServer } from '../api/protocollo.js'
+import type { Livello, StatoServer } from '../api/protocollo.js'
 import { Ponte } from '../rete/ponte.js'
 import {
   sedeDi,
@@ -49,7 +49,7 @@ export interface ClientVivo {
 export interface OpzioniSupervisore {
   /** Letto ogni volta, mai copiato: il progetto cambia sotto i piedi. */
   readonly progetto: () => Progetto
-  readonly suDiario: (livello: 'info' | 'attenzione' | 'grave', testo: string) => void
+  readonly suDiario: (livello: Livello, testo: string) => void
   /** Un client mai visto prima: il motore decide se aggiungerlo al progetto. */
   readonly suClientNuovo: (clientId: string, nome: string) => void
   /**

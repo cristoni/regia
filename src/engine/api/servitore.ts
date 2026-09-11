@@ -42,11 +42,11 @@ export interface Motore {
    * rete che sta gia portando 11 Mbit/s di PCM. Chiudere una scheda restituisce
    * banda agli Altoparlanti, e questo e il messaggio che glielo dice.
    */
-  interessatoVideo?(telecamere: readonly string[]): void
+  interessatoVideo(telecamere: readonly string[]): void
   /** L'ultimo fotogramma chiave, da mandare subito a chi si iscrive adesso. */
-  ultimoIdr?(telecameraId: string): Uint8Array | null
+  ultimoIdr(telecameraId: string): Uint8Array | null
   /** L'elenco dei file registrati, servito su `/api/registrazioni`. */
-  elencoRegistrazioni?(): Promise<readonly unknown[]>
+  elencoRegistrazioni(): Promise<readonly unknown[]>
   /**
    * Un Suono caricato dall'interfaccia, come byte.
    *
@@ -55,10 +55,10 @@ export interface Motore {
    * il percorso vero del file, e il tablet della Fase 3 non ha nemmeno lo
    * stesso disco. I byte, invece, funzionano da tutti e tre i posti.
    */
-  importaSuono?(nome: string, dati: Buffer): Promise<void>
+  importaSuono(nome: string, dati: Buffer): Promise<void>
   /** Il progetto in JSON, senza password, per il pulsante "esporta". */
-  esportaProgetto?(): Promise<string>
-  importaProgettoDaTesto?(testo: string): Promise<void>
+  esportaProgetto(): Promise<string>
+  importaProgettoDaTesto(testo: string): Promise<void>
 }
 
 /** Un corpo di richiesta intero, con un tetto: 200 MB e un Suono lunghissimo. */
@@ -243,7 +243,7 @@ export class Servitore {
       // e configurabile. Ogni IDR e preceduto da SPS e PPS, quindi basta lui.
       for (const id of c.video) {
         if (prima.has(id)) continue
-        const idr = this.motore.ultimoIdr?.(id)
+        const idr = this.motore.ultimoIdr(id)
         if (idr && c.socket.readyState === 1) c.socket.send(impacchettaVideo(id, true, idr))
       }
       return
@@ -269,7 +269,6 @@ export class Servitore {
    * restano una connessione sola verso il telefono (§4.5).
    */
   private aggiornaInteresseVideo(): void {
-    if (!this.motore.interessatoVideo) return
     const unione = new Set<string>()
     for (const c of this.connessioni) for (const id of c.video) unione.add(id)
     this.motore.interessatoVideo([...unione])
@@ -299,7 +298,7 @@ export class Servitore {
     // dieci volte al secondo. Si va a prendere quando serve.
     if (req.url === '/api/registrazioni') {
       try {
-        const elenco = (await this.motore.elencoRegistrazioni?.()) ?? []
+        const elenco = await this.motore.elencoRegistrazioni()
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify(elenco))
       } catch (e) {
@@ -312,7 +311,7 @@ export class Servitore {
     if (req.url?.startsWith('/api/suoni') && req.method === 'POST') {
       const nome = new URL(req.url, 'http://x').searchParams.get('nome') ?? 'suono'
       try {
-        await this.motore.importaSuono?.(nome, await leggiCorpo(req))
+        await this.motore.importaSuono(nome, await leggiCorpo(req))
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
         res.end('{"ok":true}')
       } catch (e) {
@@ -325,11 +324,11 @@ export class Servitore {
     if (req.url === '/api/progetto') {
       try {
         if (req.method === 'POST') {
-          await this.motore.importaProgettoDaTesto?.((await leggiCorpo(req)).toString('utf8'))
+          await this.motore.importaProgettoDaTesto((await leggiCorpo(req)).toString('utf8'))
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
           res.end('{"ok":true}')
         } else {
-          const testo = (await this.motore.esportaProgetto?.()) ?? '{}'
+          const testo = await this.motore.esportaProgetto()
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'content-disposition': 'attachment; filename="progetto-regia.json"',

@@ -51,7 +51,7 @@ import { apriCartella } from './apri-cartella.js'
 import { vigilaAnello } from './anello.js'
 import { DpapiNonDisponibile, cifra, decifra } from './sicurezza/dpapi.js'
 import { OPZIONI_PREDEFINITE, Servitore, type Motore, type OpzioniServitore } from './api/servitore.js'
-import type { Comando, Evento, Stato, ZonaViva } from './api/protocollo.js'
+import type { Comando, Evento, Livello, Stato, ZonaViva } from './api/protocollo.js'
 
 export interface OpzioniMotore {
   /** Cartella dei dati di Regia: progetto, suoni, cache. */
@@ -66,6 +66,22 @@ export interface MotoreAvviato {
   readonly porta: number
   ferma(): Promise<void>
 }
+
+/**
+ * Cio che il motore usa delle sue tre dipendenze -- e niente di piu.
+ *
+ * Tipi strutturali (`Pick`) invece delle classi concrete, e non per gusto: le
+ * classi hanno campi privati, quindi un finto non le puo soddisfare, e il test
+ * di regressione sull'importazione ha bisogno di un thread audio che fallisca
+ * a comando -- un caso che contro il worker vero non si riesce a costruire.
+ */
+export type ArchivioDelMotore = Pick<ArchivioProgetto, 'programmaSalvataggio'>
+export type LibreriaDelMotore = Pick<LibreriaSuoni, 'importa' | 'assicura' | 'assicuraTutti'>
+export type AudioDelMotore = Pick<
+  MotoreAudio,
+  | 'configura' | 'suona' | 'sottofondo' | 'volume' | 'stopZona' | 'stopTutto'
+  | 'caricaSuono' | 'scaricaSuono' | 'statoDi'
+>
 
 /**
  * Quanto si aspetta prima di riavviare il server dopo un cambio di Zone.
@@ -86,7 +102,7 @@ export class MotoreRegia implements Motore {
   private readonly durateSegnali = new Map<string, number>()
   private readonly ascoltatoriVideo: ((id: string, chiave: boolean, d: Uint8Array) => void)[] = []
   private readonly ascoltatoriDiario: ((e: Extract<Evento, { tipo: 'diario' }>) => void)[] = []
-  private readonly avvisi: { livello: 'info' | 'attenzione' | 'grave'; testo: string }[] = []
+  private readonly avvisi: { livello: Livello; testo: string }[] = []
   private readonly righeDiario: Extract<Evento, { tipo: 'diario' }>[] = []
   /** Password decifrate, tenute solo in memoria: sul disco stanno cifrate (§6). */
   private readonly passwordInChiaro = new Map<string, string>()
@@ -124,9 +140,9 @@ export class MotoreRegia implements Motore {
 
   constructor(
     progetto: Progetto,
-    private readonly archivio: ArchivioProgetto,
-    private readonly libreria: LibreriaSuoni,
-    private readonly audio: MotoreAudio,
+    private readonly archivio: ArchivioDelMotore,
+    private readonly libreria: LibreriaDelMotore,
+    private readonly audio: AudioDelMotore,
   ) {
     this.progetto = progetto
     // Gli identificativi ripartono da oltre il massimo gia nel file: un
@@ -304,7 +320,7 @@ export class MotoreRegia implements Motore {
     }
   }
 
-  diario(livello: 'info' | 'attenzione' | 'grave', testo: string): void {
+  diario(livello: Livello, testo: string): void {
     const e = { tipo: 'diario', quando: new Date().toISOString(), livello, testo } as const
     this.righeDiario.push(e)
     if (this.righeDiario.length > RIGHE_DIARIO) this.righeDiario.shift()
@@ -513,7 +529,6 @@ export class MotoreRegia implements Motore {
       case 'suono.elimina': {
         const s = this.suono(c.suonoId)
         this.progetto.suoni = this.progetto.suoni.filter((x) => x.id !== c.suonoId)
-        this.libreria.dimentica(c.suonoId)
         this.suoniPronti.delete(c.suonoId)
         this.audio.scaricaSuono(c.suonoId)
         for (const z of this.progetto.zone) {
@@ -802,9 +817,37 @@ export class MotoreRegia implements Motore {
     )
   }
 
-  /** Il thread audio conferma di avere un Suono in memoria. */
-  segnaSuonoPronto(suonoId: string, durataMs: number): void {
-    this.suoniPronti.set(suonoId, durataMs)
+  /**
+   * Assicura i `.pcm` di tutta la libreria, li fa caricare al thread audio e
+   * riavvia i Sottofondi delle Zone.
+   *
+   * E la stessa strada per l'avvio (§3.9: riaprendo l'app tutto torna com'era,
+   * Sottofondo compreso) e per `progetto.importa`, con la stessa semantica: un
+   * Suono che non si decodifica o non si carica degrada a riga di Diario e
+   * resta "non pronto", senza fermare gli altri. Prima erano due copie, e
+   * quella dell'importazione esplodeva a meta -- col progetto gia sostituito e
+   * nessun rollback possibile.
+   */
+  async caricaSuoniEAvviaSottofondi(): Promise<void> {
+    const esito = await this.libreria.assicuraTutti(this.progetto.suoni, this.progetto.audio)
+    for (const errore of esito.errori) this.diario('attenzione', errore.message)
+    for (const { suono, percorso, durataMs } of esito.pronti) {
+      suono.durataMs = durataMs
+      try {
+        await this.audio.caricaSuono(suono.id, percorso)
+        this.suoniPronti.set(suono.id, durataMs)
+      } catch (e) {
+        this.diario('attenzione', `Suono "${suono.nome}" non caricato: ${(e as Error).message}`)
+      }
+    }
+    // Il Sottofondo riparte solo se il suo Suono e davvero in memoria ADESSO:
+    // il vincolo su `suoniPronti` e cio che impedisce di far suonare campioni
+    // rimasti nella cache del thread audio da un progetto precedente.
+    for (const z of this.progetto.zone) {
+      if (!z.sottofondoId || !this.suoniPronti.has(z.sottofondoId)) continue
+      const s = this.progetto.suoni.find((x) => x.id === z.sottofondoId)
+      if (s) this.audio.sottofondo(z.id, s.id, s.guadagno)
+    }
   }
 
   segnaSegnale(id: string, durataMs: number): void {
@@ -942,6 +985,11 @@ export class MotoreRegia implements Motore {
     }
 
     await this.registratore.chiudi()
+    // I Suoni del progetto vecchio si scaricano dal thread audio PRIMA di
+    // caricare i nuovi. Non e pulizia: se il progetto nuovo riusa un id e il
+    // suo file non si carica, il mixer ritroverebbe in cache i campioni vecchi
+    // e un Sottofondo partirebbe con l'audio del progetto sbagliato.
+    for (const id of this.suoniPronti.keys()) this.audio.scaricaSuono(id)
     this.progetto = letto.data
     this.passwordInChiaro.clear()
     this.suoniPronti.clear()
@@ -951,18 +999,7 @@ export class MotoreRegia implements Motore {
     this.riconfiguraTutto()
     this.telecamere.sincronizza()
 
-    const esito = await this.libreria.assicuraTutti(this.progetto.suoni, this.progetto.audio)
-    for (const e of esito.errori) this.diario('attenzione', e.message)
-    for (const { suono, percorso: pcm, durataMs } of esito.pronti) {
-      suono.durataMs = durataMs
-      await this.audio.caricaSuono(suono.id, pcm)
-      this.suoniPronti.set(suono.id, durataMs)
-    }
-    for (const z of this.progetto.zone) {
-      if (!z.sottofondoId) continue
-      const s = this.progetto.suoni.find((x) => x.id === z.sottofondoId)
-      if (s) this.audio.sottofondo(z.id, s.id, s.guadagno)
-    }
+    await this.caricaSuoniEAvviaSottofondi()
     this.diario('info', `Progetto "${this.progetto.nome}" importato da ${percorso}`)
   }
 
@@ -1059,20 +1096,10 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
   motore = new MotoreRegia(progetto, archivio, libreria, audio)
 
   // I Suoni si decodificano qui e si caricano LA'. Il thread principale non
-  // tiene in memoria un solo campione: legge il thread audio, dal file.
-  const esitoSuoni = await libreria.assicuraTutti(progetto.suoni, progetto.audio)
-  for (const errore of esitoSuoni.errori) motore.diario('attenzione', errore.message)
-  await Promise.all(
-    esitoSuoni.pronti.map(async ({ suono, percorso, durataMs }) => {
-      suono.durataMs = durataMs
-      try {
-        await audio.caricaSuono(suono.id, percorso)
-        motore?.segnaSuonoPronto(suono.id, durataMs)
-      } catch (e) {
-        motore?.diario('attenzione', `Suono "${suono.nome}" non caricato: ${(e as Error).message}`)
-      }
-    }),
-  )
+  // tiene in memoria un solo campione: legge il thread audio, dal file. La
+  // stessa passata riavvia i Sottofondi: il §3.9 chiede che riaprendo l'app
+  // tutto torni com'era, e per una Zona "com'era" include cosa sta suonando.
+  await motore.caricaSuoniEAvviaSottofondi()
 
   // I due segnali che Regia si fabbrica da sola: Identifica e il test audio di
   // Zona. Non stanno nella libreria -- non sono Suoni del dominio -- ma per il
@@ -1090,15 +1117,6 @@ export async function avviaMotore(opzioni: Partial<OpzioniMotore> = {}): Promise
   // riprovano finche non lo trovano, e il §4.3 vuole che quando c'e non ci sia
   // mai un istante di silenzio non prodotto da noi.
   audio.avvia()
-
-  // Il Sottofondo di ogni Zona riparte da solo: il §3.9 chiede che riaprendo
-  // l'app tutto torni com'era, e per una Zona "com'era" include cosa sta suonando.
-  for (const z of progetto.zone) {
-    if (!z.sottofondoId) continue
-    const suono = progetto.suoni.find((x) => x.id === z.sottofondoId)
-    if (!suono) continue
-    audio.sottofondo(z.id, suono.id, suono.guadagno)
-  }
 
   motore.telecamere.avvia()
   motore.registratore.avvia()

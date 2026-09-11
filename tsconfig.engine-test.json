@@ -1,0 +1,13 @@
+{
+  // I test del motore girano con tsx, che i tipi li TOGLIE senza controllarli:
+  // senza questo progetto nessuno li guardava, e uno stub poteva dichiararsi
+  // `Stato` con tre campi in meno senza che nessuno se ne accorgesse (e uno lo
+  // faceva davvero). Stessa ragione, e stessa forma, di `tsconfig.ui-test.json`.
+  // I sorgenti del motore entrano da soli, via import: qui si elencano solo i test.
+  "extends": "./tsconfig.engine.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["src/engine/**/*.test.ts"],
+  "exclude": []
+}

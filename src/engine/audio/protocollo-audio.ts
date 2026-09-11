@@ -8,6 +8,7 @@
  * principale non se lo tiene in memoria per niente.
  */
 import type { ImpostazioniAudio } from '../dominio/progetto.js'
+import type { Livello } from '../api/protocollo.js'
 import type { EffettoInCorso } from './mixer.js'
 import type { StatoScrittore } from './scrittore.js'
 
@@ -58,4 +59,4 @@ export type EventoAudio =
   | { readonly tipo: 'suonoCaricato'; readonly suonoId: string; readonly durataMs: number }
   | { readonly tipo: 'suonoFallito'; readonly suonoId: string; readonly errore: string }
   | { readonly tipo: 'stato'; readonly flussi: readonly StatoFlusso[] }
-  | { readonly tipo: 'diario'; readonly livello: 'info' | 'attenzione' | 'grave'; readonly testo: string }
+  | { readonly tipo: 'diario'; readonly livello: Livello; readonly testo: string }
