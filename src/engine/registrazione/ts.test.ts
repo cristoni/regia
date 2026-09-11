@@ -13,6 +13,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { after, before, describe, it } from 'node:test'
 
+import { SpezzatoreAnnexB } from '../telecamere/annexb.js'
 import { MuxTs } from './ts.js'
 
 const cartelle: string[] = []
@@ -95,6 +96,47 @@ describe('muxer MPEG-TS: da byte H.264 a TS con PTS nostri', { skip: undefined }
     const d = pts.slice(1).map((x, i) => x - pts[i]!).sort((a, b) => a - b)
     const mediana = d[Math.floor(d.length / 2)]!
     assert.ok(Math.abs(mediana - 1 / 30) < 0.004, `spaziatura mediana ${(mediana * 1000).toFixed(1)} ms, attesa 33,3`)
+  })
+
+  it('preso a meta GOP, non esce niente prima del primo fotogramma chiave', async (t) => {
+    if (!ffmpeg || !ffprobe) return t.skip('ffmpeg/ffprobe non disponibili')
+    const dir = await cartella()
+    const h264 = path.join(dir, 'ref.h264')
+    generaH264(h264)
+    const byte = new Uint8Array(await fs.readFile(h264))
+
+    // Si taglia via ESATTAMENTE la prima unita (SPS+PPS+IDR): il confine lo
+    // trova lo stesso spezzatore che usa il muxer. Il flusso che si da in pasto
+    // comincia cosi con i P-frame del primo GOP -- come una registrazione
+    // avviata a meta -- e il primo chiave e il fotogramma 15 (`-g 15`).
+    let taglio = 0
+    const sonda = new SpezzatoreAnnexB((u) => {
+      if (taglio === 0) taglio = u.length
+    })
+    sonda.spingi(byte)
+    assert.ok(taglio > 0, 'lo spezzatore deve trovare la prima unita')
+    const daMeta = byte.subarray(taglio)
+
+    let orologio = 0
+    const pezzi: Uint8Array[] = []
+    const mux = new MuxTs({ scrivi: (ts) => pezzi.push(ts), adesso: () => (orologio += 1000 / 30) })
+    for (let i = 0; i < daMeta.length; i += 1500) mux.spingi(daMeta.subarray(i, i + 1500))
+    mux.chiudi()
+
+    const tsFile = path.join(dir, 'out.ts')
+    await fs.writeFile(tsFile, Buffer.concat(pezzi.map((p) => Buffer.from(p))))
+
+    const csv = execFileSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', tsFile]).toString()
+    const righe = csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
+
+    // I 14 P-frame orfani sono stati trattenuti: restano i fotogrammi dal 15 in
+    // poi (l'ultimo lo butta `chiudi`, che non puo sapere se e completo).
+    assert.ok(righe.length >= 43 && righe.length <= 46,
+      `attesi ~44 fotogrammi dal primo chiave in poi, letti ${righe.length}`)
+    const [primoPts, primeFlag] = righe[0]!.split(',')
+    assert.ok(parseFloat(primoPts!) < 0.05, `il primo PTS deve essere ~0, era ${primoPts}`)
+    assert.match(primeFlag!, /K/, 'il primo fotogramma emesso deve essere quello chiave')
   })
 
   it('il video sopravvive a -c copy: framing e byte sono intatti', async (t) => {

@@ -129,9 +129,10 @@ export interface OpzioniMuxTs {
  * Trasforma il flusso di byte H.264 di una Telecamera in MPEG-TS con PTS nostri.
  *
  * Si spinge dentro il byte grezzo (`spingi`), e a ogni unita di accesso completa
- * escono i pacchetti TS dal callback `scrivi`. Un'istanza per registrazione: il
- * primo fotogramma fissa lo zero della sua linea temporale, quindi un ffmpeg
- * nuovo (dopo una ripresa) vuole un muxer nuovo.
+ * escono i pacchetti TS dal callback `scrivi` -- ma non prima del primo
+ * fotogramma chiave: fino a quello non esce nulla (vedi `emettiUnita`). Il primo
+ * fotogramma emesso fissa lo zero della linea temporale, quindi un ffmpeg nuovo
+ * (dopo una ripresa) vuole un muxer nuovo.
  */
 export class MuxTs {
   private readonly spezzatore: SpezzatoreAnnexB
@@ -140,7 +141,7 @@ export class MuxTs {
   private t0: number | null = null
   private ultimoPts = -1
   private ccVideo = 0
-  private tabelleMandate = false
+  private chiaveVista = false
 
   constructor(opzioni: OpzioniMuxTs) {
     this.scrivi = opzioni.scrivi
@@ -158,6 +159,21 @@ export class MuxTs {
   }
 
   private emettiUnita(unita: Uint8Array, chiave: boolean): void {
+    // Prima del primo fotogramma chiave non esce NIENTE. La registrazione
+    // comincia quasi sempre a meta GOP (il gestore consegna i byte da dove si
+    // trova lo stream), e quei P-frame senza riferimenti nessuno li decodifica.
+    // Peggio: le dimensioni del video ffmpeg le legge dall'SPS, che viaggia col
+    // fotogramma chiave (annexb.ts, misurato) -- se il primo chiave e oltre la
+    // sua finestra di sondaggio, ffmpeg si arrende («Could not find codec
+    // parameters»), non scrive l'intestazione e il file resta VUOTO, in
+    // silenzio. Misurato l'11 settembre 2026, e capitava uguale col vecchio
+    // ingresso H.264 grezzo. Trattenere fino al chiave elimina la classe di
+    // guasto: il primo byte che ffmpeg vede e sempre SPS+PPS+IDR.
+    if (!this.chiaveVista) {
+      if (!chiave) return
+      this.chiaveVista = true
+    }
+
     const ora = this.adesso()
     this.t0 ??= ora
     // PTS a 90 kHz, dallo zero del primo fotogramma. Strettamente crescente:
@@ -166,13 +182,11 @@ export class MuxTs {
     if (pts <= this.ultimoPts) pts = this.ultimoPts + 1
     this.ultimoPts = pts
 
-    // PAT e PMT si mandano prima della PRIMA unita e poi prima di ogni keyframe:
-    // la prima volta perche la registrazione puo iniziare a meta GOP (il gestore
-    // consegna i byte da dove si trova lo stream), e senza le tabelle ffmpeg non
-    // saprebbe che il PID 0x100 e H.264; le volte dopo perche un lettore che si
-    // aggancia a meta (o ffmpeg che apre un segmento nuovo) le ritrova subito.
-    if (chiave || !this.tabelleMandate) {
-      this.tabelleMandate = true
+    // PAT e PMT prima di ogni keyframe -- e la prima unita che esce di qui E'
+    // un keyframe, quindi ffmpeg le ha prima di qualunque video. Rimandarle poi
+    // serve a un lettore che si aggancia a meta (o a ffmpeg che apre un
+    // segmento nuovo): le ritrova subito.
+    if (chiave) {
       this.scrivi(costruisciPat())
       this.scrivi(costruisciPmt())
     }

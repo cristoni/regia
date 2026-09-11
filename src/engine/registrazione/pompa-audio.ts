@@ -104,11 +104,13 @@ export class PompaAudio {
   /**
    * Fa partire l'orologio.
    *
-   * Si chiama al **primo byte di video**, non all'avvio di ffmpeg: i due
-   * ingressi vengono normalizzati da ffmpeg ciascuno a partire dal proprio
-   * primo pacchetto, quindi farli cominciare insieme e l'unico modo semplice di
-   * non ritrovarsi l'audio avanti di un secondo -- il tempo che passa prima che
-   * arrivi il primo fotogramma chiave.
+   * Si chiama al **primo pacchetto video emesso dal muxer** -- cioe al primo
+   * fotogramma chiave, perche prima il `MuxTs` trattiene tutto -- non all'avvio
+   * di ffmpeg e nemmeno al primo byte grezzo: i due ingressi vengono
+   * normalizzati da ffmpeg ciascuno a partire dal proprio primo pacchetto,
+   * quindi lo zero dell'audio deve coincidere con lo zero del video, che e il
+   * fotogramma chiave, non il primo P-frame indecodificabile che l'ha
+   * preceduto.
    */
   avvia(): void {
     if (this.avviata || this.chiusa) return
@@ -117,6 +119,12 @@ export class PompaAudio {
     // ffmpeg ricomincia da zero, e l'audio deve ricominciare con lui.
     this.inizioMs = Date.now()
     this.byteScritti = 0
+    // I campioni arrivati PRIMA di adesso accompagnavano video che non e mai
+    // uscito dal muxer: tenerli vorrebbe dire aprire il file con fino a mezzo
+    // secondo di suono piu vecchio del primo fotogramma, cioe un audio in
+    // ritardo per tutta la ripresa. Stesso principio di `sospendi()`.
+    this.coda = []
+    this.byteInCoda = 0
     this.battito = setInterval(() => this.giro(), BLOCCO_MS)
     this.battito.unref?.()
   }

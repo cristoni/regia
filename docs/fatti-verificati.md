@@ -802,3 +802,21 @@ contenuto A/V e il comportamento contro la telecamera vera (irraggiungibile in q
   → **Da verificare sul campo [surrogato]**: che una vera registrazione dalla telecamera vera esca
   fluida e in sincrono A/V. Le misure qui sopra provano la cadenza dei PTS e la tenuta della
   segmentazione, non il sincrono del contenuto.
+- **[misurato]** **Un primo fotogramma chiave lontano lasciava il file VUOTO, in silenzio.** Se il
+  primo IDR sta oltre la finestra di sondaggio di ffmpeg (provato con GOP da 10 s e ingresso preso
+  a metà), `avformat_find_stream_info` non trova le dimensioni («Could not find codec parameters …
+  unspecified size»), il segmentatore non scrive l'intestazione («dimensions not set») e **zero
+  segmenti escono su disco** — identico con l'ingresso H.264 grezzo di prima e con l'MPEG-TS: era
+  un limite preesistente, non una regressione del muxer. La cura sta nel `MuxTs`: **trattiene
+  tutto fino al primo fotogramma chiave** (che sul telefono porta con sé SPS e PPS, misurato in
+  annexb.ts), così i primi byte che ffmpeg vede sono sempre SPS+PPS+IDR. Rifatta la prova
+  patologica dopo la cura: 1 segmento, 299 fotogrammi, 10,6 s — tutto il girato dal chiave in poi.
+- **[misurato]** **Con il trattenimento sparisce anche il rumore d'avvio.** Un ingresso MPEG-TS
+  preso a metà GOP produce le STESSE righe del decodificatore h264 del percorso grezzo
+  («non-existing PPS», «no frame!») — 88 righe, tutte già filtrate da `RUMORE_DI_AVVIO` — non le
+  lamentele del demuxer TS. Con il trattenimento non ne arriva più nessuna: resta una sola riga,
+  «Guessed Channel Layout: mono», che viene dall'ingresso **audio** (invariato) e c'era anche prima.
+- **[sorgente]** **Lo zero dell'audio si è spostato con lui.** La pompa parte alla prima emissione
+  del muxer (il primo chiave), non più al primo byte grezzo, e `avvia()` svuota la coda dei
+  campioni arrivati prima: senza, l'audio aprirebbe il file fino a mezzo secondo (`CODA_MASSIMA_MS`)
+  più vecchio del primo fotogramma, cioè in ritardo per tutta la ripresa.

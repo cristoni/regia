@@ -79,14 +79,17 @@ interface InCorso {
 const CADENZA_SPAZIO_MS = 10_000
 
 /**
- * Le lamentele che ffmpeg fa **sempre** quando entra in un flusso H.264 gia
- * cominciato, e che smettono da sole al primo fotogramma chiave.
+ * Le lamentele che ffmpeg fa quando entra in un flusso H.264 gia cominciato, e
+ * che smettono da sole al primo fotogramma chiave. Misurato: una ventina di
+ * righe per avvio, identiche con l'ingresso grezzo di prima e con l'MPEG-TS di
+ * adesso. Nel Diario -- che il §3.10 vuole leggibile dall'Operatore --
+ * sarebbero venti allarmi su cui non c'e niente da fare, mescolati a quello
+ * vero.
  *
- * Succede a ogni ripresa dopo una caduta del Wi-Fi (§3.7): i byte ricominciano
- * a meta di un NAL e il decodificatore non ha ancora visto SPS e PPS. Misurato:
- * una ventina di righe per ripresa. Nel Diario -- che il §3.10 vuole leggibile
- * dall'Operatore -- sarebbero venti allarmi su cui non c'e niente da fare,
- * mescolati a quello vero.
+ * Da quando il `MuxTs` trattiene tutto fino al primo fotogramma chiave, a
+ * ffmpeg un flusso preso a meta non arriva piu e queste righe non dovrebbero
+ * comparire. Il filtro resta: costa una regex, e se un giorno il trattenimento
+ * cambiasse il Diario non deve tornare a riempirsi.
  */
 const RUMORE_DI_AVVIO = /non-existing PPS|decode_slice_header error|no frame!|Last message repeated/
 
@@ -202,14 +205,12 @@ export class Registratore {
         }
         const f = inCorso.ffmpeg
         if (!f || f.stdin.destroyed || !inCorso.mux) return
-        // Da qui in poi i due ingressi corrono insieme: ffmpeg normalizza ogni
-        // ingresso a partire dal proprio primo pacchetto, quindi farli
-        // cominciare nello stesso istante e cio che tiene l'audio in sincrono
-        // col video invece che avanti di un secondo.
-        inCorso.pompa?.avvia()
-        // I byte grezzi H.264 passano dal muxer, che li spezza in unita di
-        // accesso e le impacchetta in MPEG-TS con un PTS nostro. E' lui a
-        // scrivere sullo stdin di ffmpeg (via il callback impostato in apriFfmpeg).
+        // I byte grezzi H.264 passano dal muxer, che trattiene tutto fino al
+        // primo fotogramma chiave e poi impacchetta ogni unita di accesso in
+        // MPEG-TS con un PTS nostro. E' lui a scrivere sullo stdin di ffmpeg
+        // (via il callback impostato in apriFfmpeg) -- ed e li, alla prima
+        // emissione, che parte anche la pompa dell'audio: i due zeri devono
+        // coincidere.
         inCorso.mux.spingi(d)
       },
       caduto: (motivo) => {
@@ -359,8 +360,14 @@ export class Registratore {
     // e i pacchetti TS che produce vanno nello stdin di *questo* processo.
     // Contropressione ignorata di proposito, come per il video grezzo di prima:
     // la sorgente e' un telefono a ~1,5 Mbit/s verso un disco locale.
+    //
+    // La pompa dell'audio parte QUI, alla prima emissione del muxer, non al
+    // primo byte grezzo: il muxer trattiene tutto fino al primo fotogramma
+    // chiave, e se l'audio partisse prima il suo zero starebbe fino a un GOP
+    // avanti a quello del video -- audio in ritardo per tutta la ripresa.
     inCorso.mux = new MuxTs({
       scrivi: (ts) => {
+        inCorso.pompa?.avvia()
         if (!f.stdin.destroyed) f.stdin.write(Buffer.from(ts))
       },
     })
