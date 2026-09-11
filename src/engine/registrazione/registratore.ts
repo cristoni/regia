@@ -34,6 +34,7 @@ import type { Progetto } from '../dominio/progetto.js'
 import type { Livello } from '../api/protocollo.js'
 import { trovaFfmpeg } from '../media/ffmpeg.js'
 import { CANALI_AUDIO, FREQUENZA_AUDIO, PompaAudio } from './pompa-audio.js'
+import { MuxTs } from './ts.js'
 import type { GestoreTelecamere } from '../telecamere/gestore.js'
 
 export interface OpzioniRegistratore {
@@ -56,6 +57,12 @@ export interface StatoRegistratore {
 
 interface InCorso {
   ffmpeg: ChildProcessWithoutNullStreams | null
+  /**
+   * Il muxer che da' un PTS nostro a ogni fotogramma prima di ffmpeg. Uno per
+   * ffmpeg: una ripresa fa un ffmpeg nuovo, quindi un muxer nuovo (che riparte
+   * dallo zero della sua linea temporale). Vedi `ts.ts`.
+   */
+  mux: MuxTs | null
   stacca: () => void
   /** Vero mentre si aspetta che il telefono torni: REC resta acceso (§3.7). */
   inAttesa: boolean
@@ -132,6 +139,7 @@ export class Registratore {
 
     const inCorso: InCorso = {
       ffmpeg: null,
+      mux: null,
       stacca: () => {},
       inAttesa: false,
       chiudendo: false,
@@ -164,7 +172,15 @@ export class Registratore {
       } catch (e) {
         // Meglio registrare senza audio che non registrare: il §3.7 chiede il
         // video, l'audio e un'opzione.
+        //
+        // ⚠️ Si azzera ANCHE `portaAudio` e si chiude la pompa: senza,
+        // `portaAudio` restava impostata, ffmpeg partiva con `-map 1:a` verso
+        // una pompa che ascolta ma non parte mai, si bloccava sull'ingresso
+        // muto, veniva ucciso dopo 5 s e lasciava un MP4 senza `moov` --
+        // illeggibile -- piu' un server della pompa mai chiuso.
+        await inCorso.pompa?.chiudi().catch(() => {})
         inCorso.pompa = null
+        inCorso.portaAudio = null
         this.opzioni.suDiario(
           'attenzione',
           `Non sono riuscito ad aprire l'audio di "${t.nome}" (${(e as Error).message}). Registro solo il video.`,
@@ -185,17 +201,16 @@ export class Registratore {
           this.opzioni.suDiario('info', `Registrazione di "${t.nome}" ripresa su un file nuovo.`)
         }
         const f = inCorso.ffmpeg
-        if (!f || f.stdin.destroyed) return
+        if (!f || f.stdin.destroyed || !inCorso.mux) return
         // Da qui in poi i due ingressi corrono insieme: ffmpeg normalizza ogni
         // ingresso a partire dal proprio primo pacchetto, quindi farli
         // cominciare nello stesso istante e cio che tiene l'audio in sincrono
         // col video invece che avanti di un secondo.
         inCorso.pompa?.avvia()
-        // Contropressione ignorata di proposito: la sorgente e un telefono a
-        // ~1,5 Mbit/s e la destinazione e un disco locale. Se davvero non
-        // stesse dietro, accumulare in memoria sarebbe comunque meglio che
-        // perdere fotogrammi in mezzo a un file.
-        f.stdin.write(Buffer.from(d))
+        // I byte grezzi H.264 passano dal muxer, che li spezza in unita di
+        // accesso e le impacchetta in MPEG-TS con un PTS nostro. E' lui a
+        // scrivere sullo stdin di ffmpeg (via il callback impostato in apriFfmpeg).
+        inCorso.mux.spingi(d)
       },
       caduto: (motivo) => {
         if (inCorso.chiudendo) return
@@ -300,11 +315,14 @@ export class Registratore {
     const argomenti = [
       '-hide_banner',
       '-loglevel', 'warning',
-      // I byte grezzi non portano orologio: senza questo ffmpeg assumerebbe 25
-      // fps nominali e il girato scorrerebbe a velocita sbagliata. Datare
-      // all'arrivo e l'unica misura del tempo che esiste davvero qui.
-      '-use_wallclock_as_timestamps', '1',
-      '-f', 'h264',
+      // Il video arriva gia' come MPEG-TS con i PTS che ha messo Regia (`MuxTs`),
+      // NON come H.264 grezzo con `-use_wallclock_as_timestamps`. Quel percorso
+      // faceva timbrare a ffmpeg l'ora di lettura: con l'ingresso audio accanto,
+      // il muxer affamava il lettore video (DTS all'epoch contro DTS audio da
+      // ~0) e il girato diventava una diapositiva + avanti-veloce. Con i PTS
+      // vicini allo zero, nello stesso intervallo dell'audio, l'interleave
+      // funziona. Misurato il 2026-09-11; vedi ts.ts e docs/fatti-verificati.md.
+      '-f', 'mpegts',
       '-i', 'pipe:0',
       // Il secondo ingresso e la pompa, non il telefono: ffmpeg si collega a
       // una socket che Regia serve, e da li escono campioni **sempre**, anche
@@ -337,6 +355,15 @@ export class Registratore {
 
     const f = spawn(ff.percorso, argomenti, { windowsHide: true })
     inCorso.ffmpeg = f
+    // Un muxer nuovo per questo ffmpeg: la sua linea temporale riparte da zero,
+    // e i pacchetti TS che produce vanno nello stdin di *questo* processo.
+    // Contropressione ignorata di proposito, come per il video grezzo di prima:
+    // la sorgente e' un telefono a ~1,5 Mbit/s verso un disco locale.
+    inCorso.mux = new MuxTs({
+      scrivi: (ts) => {
+        if (!f.stdin.destroyed) f.stdin.write(Buffer.from(ts))
+      },
+    })
     inCorso.inAttesa = false
 
     // Lo stderr di ffmpeg arriva a pezzi che non coincidono con le righe: senza
@@ -398,6 +425,10 @@ export class Registratore {
   private chiudiFfmpeg(inCorso: InCorso): Promise<void> {
     const f = inCorso.ffmpeg
     inCorso.ffmpeg = null
+    // Il muxer butta l'ultima unita incompleta (non e un fotogramma) e si
+    // chiude con questo ffmpeg: il prossimo ne avra' uno nuovo, dallo zero.
+    inCorso.mux?.chiudi()
+    inCorso.mux = null
     // Prima si chiude il secondo ingresso, poi si aspetta: ffmpeg esce quando
     // finiscono tutti i suoi ingressi, non solo lo stdin. Misurato: senza
     // questa riga non usciva mai, lo si ammazzava dopo cinque secondi e il

@@ -757,3 +757,48 @@ misura è un danno.
     → E resta da decidere se snapserver vada dichiarato come dipendenza di un `.deb` — oggi il
     `.deb` non è nemmeno un bersaglio — con gli obblighi GPL-3.0 che ne verrebbero: vedi la
     correzione dell'ADR 0003.
+
+## La linea temporale del video registrato, misurato l'11 settembre 2026
+
+Diagnosi di tre registrazioni difettose fatte sul campo (router dedicato, `.exe` portatile) e cura,
+tutto **[misurato]** con esperimenti ffmpeg sul binario in bundle (`vendor/ffmpeg/ffmpeg.exe`,
+N-126482) e su due file veri (`Ingresso_Telecamera-3_20260911_163554.mp4` e `..._163657.mp4`).
+⚠️ **Tutte queste misure usano audio sintetico muto e un H.264 sintetico**: il sincrono di
+contenuto A/V e il comportamento contro la telecamera vera (irraggiungibile in queste prove:
+`192.168.1.3:4444` rifiutava le connessioni) restano **da verificare**.
+
+- **[misurato]** **La registrazione a due ingressi affamava il video, ed era una diapositiva.**
+  Con `-use_wallclock_as_timestamps 1` sul video (grezzo H.264) e l'audio della pompa come secondo
+  ingresso, ffmpeg dava al video un DTS all'epoch (~1,7·10⁹ s) e all'audio un DTS da conteggio
+  campioni (~0). Il suo muxer ordina per DTS: drenava sempre l'audio e leggeva il video a ~3,9 fps,
+  poi scaricava tutto l'arretrato in un lampo alla chiusura. Nei due file veri: consegna «viva» a
+  4,49 fps (WiFi 100%) e 3,87 fps (WiFi debole) — **indistinguibili**, e uguali al ciclo limite
+  sintetico a consegna perfetta (3,9 fps): **il WiFi non c'entrava**, era il muxer.
+- **[misurato]** **Nessuna impostazione di interleave colma il divario.** `-max_interleave_delta 0`
+  e `-thread_queue_size 4096` falliscono entrambi su 90 s: il divario è da un epoch (~1,7·10⁹ s) e
+  il tetto di `max_interleave_delta` è ~2147 s. Portare l'audio all'epoch (`wallclock` su tutti e
+  due gli ingressi) sistema il video ma **rompe l'audio**: `start_time` all'epoch, 4700+ correzioni
+  di DTS non monotono, audio presente **solo nell'ultimo segmento**. Anche una catena di due ffmpeg
+  (uno che rifà mpegts) porta l'epoch fino in fondo, con o senza `-copyts/-start_at_zero/-avoid_negative_ts`.
+- **[misurato]** **La cura: i PTS li mette Regia.** Un muxer MPEG-TS minimo (`ts.ts`) dà a ogni
+  fotogramma un PTS preso dall'orologio al momento dell'emissione, riportato a zero sul primo. Un
+  solo ffmpeg legge quel TS (`-f mpegts`) più l'audio della pompa. Misurato su 90 s a
+  `-segment_time 30`: **3 segmenti da ~900 fotogrammi, mediana 42-46 ms, nessuna raffica di coda,
+  audio in ogni segmento, zero avvisi**, contro i ~327 ms di mediana e la raffica da 2340
+  fotogrammi del percorso vecchio. Identico al controllo solo-video. La segmentazione e il percorso
+  di ripresa non cambiano: è sempre un ffmpeg che segmenta da sé.
+  → Assunzione ereditata: **una slice per fotogramma**. Lo `SpezzatoreAnnexB` emette su ogni NAL di
+  slice, e sul telefono è misurato che ce n'è una sola per fotogramma. Una sorgente multi-slice
+  darebbe più PES per fotogramma con PTS diversi — ma la stessa assunzione la fa già il conteggio
+  degli fps.
+- **[misurato]** **«Niente audio» era falso.** Il file `..._163657.mp4` ha una traccia AAC mono
+  vera (53,4 s, media −25,4 dB): presente ma **piano**, non muto. Se in riproduzione non si sente,
+  è il livello o il lettore, non il contenitore.
+- **[sorgente]** **Un baco collaterale, corretto nello stesso passaggio.** In `registratore.ts`, se
+  `apriAudio()` falliva in modo sincrono, `portaAudio` restava impostata: ffmpeg partiva con
+  `-map 1:a` verso una pompa che ascolta ma non parte mai, si bloccava, veniva ucciso dopo 5 s e
+  lasciava un MP4 senza `moov` (illeggibile), più il server della pompa mai chiuso. Ora la `catch`
+  azzera `portaAudio` e chiude la pompa.
+  → **Da verificare sul campo [surrogato]**: che una vera registrazione dalla telecamera vera esca
+  fluida e in sincrono A/V. Le misure qui sopra provano la cadenza dei PTS e la tenuta della
+  segmentazione, non il sincrono del contenuto.
