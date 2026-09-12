@@ -464,9 +464,15 @@ table.elenco td.comandi {
 
 /* ----------------------------------------------------------- Produzione */
 
-.produzione {
+/*
+ * Il selettore lungo non e vezzo: `main.schermo > section.attiva` mette
+ * `display: block` con piu specificita di una classe sola, e un semplice
+ * `.produzione { display: grid }` perderebbe in silenzio -- e con lui il
+ * `gap` fra le sezioni. Le righe sono tutte implicite (auto): quali figli
+ * esistano dipende da cosa e nascosto, e un template fisso mentirebbe.
+ */
+main.schermo > section.produzione.attiva {
   display: grid;
-  grid-template-rows: auto auto auto 1fr;
   gap: 14px;
 }
 
@@ -478,10 +484,52 @@ table.elenco td.comandi {
  * sono la ragione per cui questa schermata esiste. La griglia ha quindi
  * un'altezza fissa in cui le celle si dividono lo spazio, come un impianto di
  * sorveglianza: e il fotogramma ad adattarsi alla cella, non il contrario.
+ * Il 40vh e solo il punto di partenza: la maniglia qui sotto sposta il
+ * confine, e `--altezza-video` la mette la schermata.
  */
 .produzione .video-griglia {
-  height: 40vh;
+  height: var(--altezza-video, 40vh);
   grid-auto-rows: 1fr;
+}
+
+/*
+ * La maniglia fra anteprime e Zone. La pillola e sottile ma la zona di presa
+ * no: il riquadro e alto 32px e i margini negativi lo fanno sbordare di 8px
+ * nei gap inerti della griglia sopra e sotto, cosi un dito al buio ha un
+ * bersaglio vero senza che il layout si allarghi -- sopra c'e la cella che
+ * ingrandisce al clic, sotto i gettoni delle Zone, e mancare la maniglia non
+ * deve premere quelli. `touch-action: none` perche sul tablet trascinare la
+ * maniglia non deve scorrere la pagina.
+ */
+.maniglia-video {
+  cursor: row-resize;
+  display: grid;
+  height: 32px;
+  margin-block: -8px;
+  place-items: center;
+  touch-action: none;
+  user-select: none;
+}
+
+.maniglia-video::before {
+  background: var(--bordo-vivo);
+  border-radius: 999px;
+  content: '';
+  height: 5px;
+  transition: background 90ms linear, width 90ms linear;
+  width: 64px;
+}
+
+.maniglia-video:hover::before,
+.maniglia-video.presa::before {
+  background: var(--accento);
+  width: 96px;
+}
+
+.maniglia-video:focus-visible {
+  border-radius: var(--raggio-piccolo);
+  outline: 2px solid var(--accento);
+  outline-offset: -2px;
 }
 
 .zone-griglia {

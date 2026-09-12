@@ -18,9 +18,40 @@ import type { Contesto, Schermata } from '../nucleo/schermata'
 import { effettiDellaZona, inCorso, passoDelFlusso, scorciatoie } from '../nucleo/viste'
 import { GrigliaVideo } from '../video/griglia'
 
+/**
+ * L'altezza delle anteprime video, in vh dell'altezza della finestra.
+ *
+ * Il 40vh del CSS e un punto di partenza, non la misura giusta per ogni
+ * serata: con una Telecamera sola merita piu schermo lei, con dodici Zone
+ * servono i riquadri. La maniglia sposta il confine, e i limiti esistono
+ * perche nessuna delle due sezioni deve poter sparire del tutto.
+ */
+const ALTEZZA_VIDEO = { minima: 15, massima: 75, predefinita: 40 }
+const CHIAVE_ALTEZZA_VIDEO = 'regia.produzione.altezza-video-vh'
+
+function limita(vh: number): number {
+  return Math.min(ALTEZZA_VIDEO.massima, Math.max(ALTEZZA_VIDEO.minima, vh))
+}
+
+function altezzaVideoSalvata(): number {
+  // localStorage puo mancare o rifiutarsi (navigazione privata sul tablet,
+  // dati di sito bloccati): senza memoria si parte dal predefinito, non si cade.
+  try {
+    const grezzo = localStorage.getItem(CHIAVE_ALTEZZA_VIDEO)
+    if (grezzo !== null) {
+      const vh = Number(grezzo)
+      if (Number.isFinite(vh)) return limita(vh)
+    }
+  } catch {
+    /* niente memoria: va bene lo stesso */
+  }
+  return ALTEZZA_VIDEO.predefinita
+}
+
 export class Produzione implements Schermata {
   readonly elemento = el('section', { class: 'produzione' })
   private readonly griglia: GrigliaVideo
+  private readonly maniglia: HTMLElement
   private readonly strisciaZone = el('div', { class: 'fila' })
   private readonly comune = el('div', { class: 'effetti' })
   private readonly rigaComune: HTMLElement
@@ -37,12 +68,14 @@ export class Produzione implements Schermata {
   private selezionate = new Set<string>()
   private esclusivo = false
   private ultimo: Stato | null = null
+  private altezzaVideo = altezzaVideoSalvata()
 
   constructor(private readonly ctx: Contesto) {
     this.griglia = new GrigliaVideo(
       (t) => ctx.avvisa(t),
       (c) => ctx.manda(c),
     )
+    this.maniglia = this.creaManiglia()
 
     const esclusivo = el('input', { type: 'checkbox' }) as HTMLInputElement
     esclusivo.addEventListener('change', () => (this.esclusivo = esclusivo.checked))
@@ -67,6 +100,7 @@ export class Produzione implements Schermata {
 
     this.elemento.append(
       this.griglia.elemento,
+      this.maniglia,
       el(
         'div',
         { class: 'striscia' },
@@ -90,6 +124,7 @@ export class Produzione implements Schermata {
     this.elencoZone = new Elenco(this.zoneGriglia, (z) => z.id, (z) => this.creaZona(z))
     this.elencoComune = new Elenco(this.comune, (s) => s.id, (s) => this.creaComune(s))
 
+    this.applicaAltezzaVideo()
     document.addEventListener('keydown', (e) => this.tasto(e))
   }
 
@@ -102,6 +137,8 @@ export class Produzione implements Schermata {
 
     this.griglia.aggiorna(stato)
     this.griglia.elemento.hidden = stato.telecamere.length === 0
+    // Senza anteprime non c'e niente da ridimensionare: la maniglia segue.
+    this.maniglia.hidden = stato.telecamere.length === 0
     this.vuoto.hidden = stato.zone.length > 0
     this.gettoni.sincronizza(stato.zone)
     this.elencoZone.sincronizza(stato.zone)
@@ -121,6 +158,115 @@ export class Produzione implements Schermata {
 
   private rinfresca(): void {
     if (this.ultimo) this.aggiorna(this.ultimo)
+  }
+
+  /**
+   * La maniglia fra anteprime e Zone: trascinandola si sposta il confine.
+   *
+   * Pointer Events con cattura, non mousedown/mousemove sul documento: la
+   * cattura tiene il trascinamento anche quando il puntatore esce
+   * dall'elemento, e funziona uguale con il dito sul tablet della Fase 3.
+   */
+  private creaManiglia(): HTMLElement {
+    const m = el('div', {
+      class: 'maniglia-video',
+      role: 'separator',
+      'aria-orientation': 'horizontal',
+      'aria-label': 'Confine fra anteprime video e Zone',
+      'aria-valuemin': String(ALTEZZA_VIDEO.minima),
+      'aria-valuemax': String(ALTEZZA_VIDEO.massima),
+      tabindex: '0',
+      title:
+        'Trascina per dividere lo spazio fra anteprime e Zone. ' +
+        'Doppio clic per tornare alla misura di partenza.',
+    })
+
+    // Il trascinamento vive di questo stato, non della cattura: la cattura e
+    // un rinforzo (tiene i `pointermove` anche fuori dall'elemento), ma se
+    // fallisce -- un puntatore gia sparito, o sintetico nei collaudi -- il
+    // confine deve muoversi lo stesso.
+    let puntatore: number | null = null
+    let partenzaY = 0
+    let partenzaAltezza = ALTEZZA_VIDEO.predefinita
+
+    m.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return
+      // Senza, il trascinamento seleziona il testo di mezza schermata.
+      e.preventDefault()
+      puntatore = e.pointerId
+      partenzaY = e.clientY
+      partenzaAltezza = this.altezzaVideo
+      classe(m, 'presa', true)
+      try {
+        m.setPointerCapture(e.pointerId)
+      } catch {
+        /* niente cattura: il trascinamento regge finche il puntatore resta qui */
+      }
+    })
+    m.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== puntatore) return
+      const delta = ((e.clientY - partenzaY) / window.innerHeight) * 100
+      this.altezzaVideo = limita(partenzaAltezza + delta)
+      this.applicaAltezzaVideo()
+    })
+    const fine = (e: PointerEvent): void => {
+      if (e.pointerId !== puntatore) return
+      puntatore = null
+      classe(m, 'presa', false)
+      if (m.hasPointerCapture(e.pointerId)) m.releasePointerCapture(e.pointerId)
+      this.salvaAltezzaVideo()
+    }
+    m.addEventListener('pointerup', fine)
+    m.addEventListener('pointercancel', fine)
+
+    m.addEventListener('dblclick', () => {
+      this.altezzaVideo = ALTEZZA_VIDEO.predefinita
+      this.applicaAltezzaVideo()
+      this.salvaAltezzaVideo()
+    })
+
+    // E un `separator` col fuoco: da tastiera deve valere quanto il mouse.
+    // Enter riporta al predefinito (il doppio clic della tastiera: col passo
+    // di 2 dai limiti dispari il 40 non si raggiunge mai a frecce), Home ed
+    // End vanno ai limiti, come nel pattern del window splitter.
+    m.addEventListener('keydown', (e) => {
+      const nuova =
+        e.key === 'ArrowUp'
+          ? limita(this.altezzaVideo - 2)
+          : e.key === 'ArrowDown'
+            ? limita(this.altezzaVideo + 2)
+            : e.key === 'Home'
+              ? ALTEZZA_VIDEO.minima
+              : e.key === 'End'
+                ? ALTEZZA_VIDEO.massima
+                : e.key === 'Enter'
+                  ? ALTEZZA_VIDEO.predefinita
+                  : null
+      if (nuova === null) return
+      e.preventDefault()
+      // Ferma anche la risalita: i tasti rapidi ascoltano sul documento e una
+      // freccia puo essere la scorciatoia di un Suono -- ridimensionare non
+      // deve far suonare niente. Gli altri tasti (Escape compreso) passano.
+      e.stopPropagation()
+      this.altezzaVideo = nuova
+      this.applicaAltezzaVideo()
+      this.salvaAltezzaVideo()
+    })
+
+    return m
+  }
+
+  private applicaAltezzaVideo(): void {
+    this.elemento.style.setProperty('--altezza-video', `${this.altezzaVideo}vh`)
+    attributo(this.maniglia, 'aria-valuenow', String(Math.round(this.altezzaVideo)))
+  }
+
+  private salvaAltezzaVideo(): void {
+    try {
+      localStorage.setItem(CHIAVE_ALTEZZA_VIDEO, String(Math.round(this.altezzaVideo)))
+    } catch {
+      /* senza memoria la scelta vale solo per stasera */
+    }
   }
 
   private creaGettone(iniziale: ZonaViva): Voce<ZonaViva> {
