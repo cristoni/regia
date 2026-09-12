@@ -86,6 +86,26 @@ win:
 
 portable:
   artifactName: ${productName}-${version}-portabile.${ext}
+  # ⚠️ **`true` qui vuol dire «una cartella nuova a ogni lancio», ed è il
+  # contrario di ciò che dice la documentazione.** La doc di `unpackDirName`
+  # promette la cartella per-lancio con `false`; il codice fa l'inverso:
+  # `NsisTarget.js` (26.15.3) mette un nome fisso — un ksuid generato alla build
+  # — quando il valore è una stringa o falsy, e solo con `true` lascia che
+  # `portable.nsi` ripieghi su `$PLUGINSDIR\app`, unica per lancio e pulita da
+  # NSIS all'uscita.
+  #
+  # Senza questo, ogni lancio dello stesso `.exe` estrae nella STESSA cartella
+  # di `%TEMP%`, e prima di estrarre fa `RMDir /r`: un secondo lancio mentre il
+  # primo è ancora aperto — o ancora in estrazione, che sono ~10 secondi muti,
+  # senza finestra né progresso — gli porta via i file sotto i piedi. Misurato
+  # il 2026-09-12: «ffmpeg.dll non è stato trovato», dove `ffmpeg.dll` è la dll
+  # di Electron accanto a `Regia.exe`, non il nostro `vendor/ffmpeg`. Il
+  # lucchetto di `requestSingleInstanceLock` in `main.ts` non può difendere:
+  # il `RMDir` succede nello stub NSIS, prima che parta una riga nostra. Con la
+  # cartella per lancio la seconda istanza estrae per conto suo, parte, trova il
+  # lucchetto occupato e si chiude da sola. Il costo è zero: l'estrazione piena
+  # a ogni lancio c'era già, il nome fisso non faceva da cache.
+  unpackDirName: true
 
 nsis:
   oneClick: false

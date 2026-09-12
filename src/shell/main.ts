@@ -13,7 +13,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { app, BrowserWindow, globalShortcut, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, globalShortcut, Menu, shell } from 'electron'
 
 import { avviaMotore, type MotoreAvviato } from '../engine/index.js'
 
@@ -49,7 +49,22 @@ if (!app.requestSingleInstanceLock()) {
     if (finestra.isMinimized()) finestra.restore()
     finestra.focus()
   })
-  void principale()
+  // La finestra nasce solo DOPO che il motore e partito: se `principale()`
+  // affonda, senza questo catch l'app resterebbe viva per sempre -- muta,
+  // senza finestra, e col lucchetto di singola istanza occupato.
+  void principale().catch(async (e: unknown) => {
+    const messaggio = e instanceof Error ? e.message : String(e)
+    dialog.showErrorBox(
+      'Regia non è partita',
+      (e as NodeJS.ErrnoException | null)?.code === 'EADDRINUSE'
+        ? 'La porta di Regia è già occupata da un altro processo: un\'altra Regia, ' +
+          'o un motore avviato da terminale e rimasto acceso. ' +
+          `Chiudilo e rilancia.\n\n(${messaggio})`
+        : messaggio,
+    )
+    await motore?.ferma().catch((err: unknown) => console.error('chiusura non pulita:', err))
+    app.exit(1)
+  })
 }
 
 async function principale(): Promise<void> {

@@ -820,3 +820,52 @@ contenuto A/V e il comportamento contro la telecamera vera (irraggiungibile in q
   del muxer (il primo chiave), non più al primo byte grezzo, e `avvia()` svuota la coda dei
   campioni arrivati prima: senza, l'audio aprirebbe il file fino a mezzo secondo (`CODA_MASSIMA_MS`)
   più vecchio del primo fotogramma, cioè in ritardo per tutta la ripresa.
+
+## Il portabile che «non si apre»: due guasti intrecciati, misurato il 12 settembre 2026
+
+- **[misurato]** **«ffmpeg.dll non è stato trovato» al lancio del portabile non è un pacchetto
+  rotto, e `ffmpeg.dll` non è il nostro ffmpeg.** È la dll di Electron che sta accanto a
+  `Regia.exe`. Il portabile 0.2.0 che dava quell'errore è risultato integro da cima a fondo:
+  `7z t` pulito sul contenitore NSIS e sul payload `app-64.7z`, `ffmpeg.dll` presente dentro
+  (2.927.616 byte, identica a `win-unpacked/`). La prima analisi si era fermata qui e aveva
+  concluso che l'exe rilanciato da solo «parte senza una piega»: **falso** — partivano i
+  processi, mai la finestra. La correzione sta due punti più sotto.
+- **[sorgente]** **Ogni lancio dello stesso portabile estraeva nella STESSA cartella di `%TEMP%`,
+  e per prima cosa la cancellava.** `portable.nsi` di app-builder-lib fa `RMDir /r $INSTDIR` e poi
+  estrae; senza `unpackDirName` il nome è un ksuid fisso per build (`NsisTarget.js:247`), quindi
+  due lanci dello stesso `.exe` condividono la cartella. Un secondo lancio mentre il primo è
+  aperto — o ancora in estrazione: ~10 s senza finestra né progresso, e il doppio clic viene da sé
+  — porta via i file all'istanza viva; i file già mappati in memoria sono bloccati e restano, gli
+  altri spariscono, e il loader di Windows mostra la dll mancante prima che parta una riga nostra.
+  `CRCCheck off` e l'estrazione via plugin fanno sì che nessun passaggio se ne lamenti.
+- **[misurato]** Alle 13:32 del 12 settembre c'erano **due stub NSIS vivi insieme** (le loro
+  `%TEMP%\ns*.tmp` sono sparite solo uccidendo i processi Regia che aspettavano in `ExecWait`):
+  è la firma di due lanci sovrapposti, ed è il quadro in cui l'errore è comparso. Con la 0.1.0
+  non era mai successo perché non era mai capitato di sovrapporre due lanci, non perché quel
+  pacchetto ne fosse immune — il ksuid cambia a ogni build, quindi 0.1.0 e 0.2.0 non collidono
+  fra loro, ma ciascuna collide con se stessa.
+- **[sorgente]** **La cura è `unpackDirName: true`, e la documentazione dice l'opposto.** La doc
+  di electron-builder promette la cartella per-lancio con `false`; in 26.15.3 il codice mette il
+  ksuid fisso per ogni valore falsy o stringa, e solo `true` lascia il ripiego su
+  `$PLUGINSDIR\app`, unica per lancio e pulita da NSIS. `requestSingleInstanceLock` in `main.ts`
+  chiude da sola la seconda istanza appena parte; non poteva evitare il `RMDir`, che avviene
+  nello stub prima di Electron. Il costo della cartella per lancio è zero: l'estrazione piena a
+  ogni avvio c'era già, il nome fisso non faceva da cache.
+- **[misurato]** **Il guasto vero, quello che rendeva i lanci «a vuoto»: un motore dimenticato
+  sulla porta 7333.** Un `tsx src/engine/avvia.ts` del giorno prima (partito alle 19:42 dell'11
+  settembre) teneva `127.0.0.1:7333`. Il motore del pacchetto prendeva `EADDRINUSE` — il
+  `Servitore` lo rifiuta correttamente — ma nel guscio `void principale()` non aveva catch: la
+  promessa affondava muta, la finestra (che nasce solo **dopo** `avviaMotore`) non arrivava mai,
+  e il processo restava vivo tenendo il lucchetto di singola istanza. Da lì ogni lancio
+  successivo moriva all'istante, in silenzio, sul lucchetto. È questo che ha invitato i doppi
+  clic da cui è nata la corsa del punto sopra: i due guasti sono uno la causa dell'altro.
+- **[misurato]** **La firma dello zombie, buona per la prossima volta:** 3 processi `Regia`
+  (main, gpu, utility) e `MainWindowHandle` a zero = motore mai arrivato in fondo all'avvio,
+  nessun renderer. Un'istanza sana ne ha 4 o più e una finestra «Regia». Il portabile uscito da
+  console senza stampare niente = lucchetto occupato da uno zombie.
+- **[misurato]** **La cura nel guscio: il fallimento parla.** `principale()` ora ha un catch che
+  mostra `dialog.showErrorBox` (con un messaggio dedicato per `EADDRINUSE`), ferma l'eventuale
+  motore e esce con `app.exit(1)`. Provato dal vivo nei due versi: con la 7333 occupata da un
+  finto ascoltatore compare il riquadro d'errore e il processo muore invece di fare lo zombie;
+  con la porta libera il portabile apre la finestra (4 processi, `MainWindowTitle` «Regia»,
+  7333 in ascolto dal pid giusto) e la X la chiude pulita, stub NSIS compreso.

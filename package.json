@@ -1,6 +1,6 @@
 {
   "name": "regia",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Controllo audio e video per casa degli orrori",
   "type": "module",
