@@ -31,7 +31,7 @@
  * assunzione la fa gia' il conteggio degli fps del gestore, quindi il muxer non
  * e' piu' fragile del resto della catena video.
  */
-import { SpezzatoreAnnexB } from '../telecamere/annexb.js'
+import { SpezzatoreAnnexB, geometriaDi } from '../telecamere/annexb.js'
 
 const SYNC = 0x47
 const PID_PAT = 0x0000
@@ -123,6 +123,20 @@ export interface OpzioniMuxTs {
   readonly scrivi: (ts: Uint8Array) => void
   /** L'orologio, iniettabile per il test. Default: `performance.now()`. */
   readonly adesso?: () => number
+  /**
+   * La rete di sicurezza del taglio-segmento (ADR 0012).
+   *
+   * Un fotogramma chiave porta una geometria diversa da quella del segmento in
+   * corso: con `-c:v copy` il contenitore ne dichiara una sola, e i lettori
+   * rigidi si bloccherebbero sul cambio. Chi riceve la chiamata chiude il
+   * segmento e ne apre uno nuovo (il ciclo caduta->ripresa del registratore),
+   * e restituisce il muxer del segmento nuovo: questo muxer gli inoltrera il
+   * fotogramma chiave incriminato e tutto cio che spezza da qui in poi, cosi
+   * il nuovo segmento parte esattamente dall'unita che ha cambiato geometria.
+   * Restituire `null` significa "non taglio": si prosegue sul segmento in
+   * corso, aggiornando la geometria di riferimento.
+   */
+  readonly suCambioGeometria?: (da: string, a: string) => MuxTs | null
 }
 
 /**
@@ -138,14 +152,24 @@ export class MuxTs {
   private readonly spezzatore: SpezzatoreAnnexB
   private readonly scrivi: (ts: Uint8Array) => void
   private readonly adesso: () => number
+  private readonly suCambioGeometria: ((da: string, a: string) => MuxTs | null) | null
   private t0: number | null = null
   private ultimoPts = -1
   private ccVideo = 0
   private chiaveVista = false
+  /** La geometria del segmento in corso, letta dall'SPS del primo chiave. */
+  private geometria: string | null = null
+  /**
+   * Il muxer del segmento aperto dopo un taglio di geometria. Da quel momento
+   * questo muxer non scrive piu: fa solo da spezzatore per i byte che gli
+   * arrivano ancora (il pacchetto in corso di `spingi`) e inoltra le unita.
+   */
+  private successore: MuxTs | null = null
 
   constructor(opzioni: OpzioniMuxTs) {
     this.scrivi = opzioni.scrivi
     this.adesso = opzioni.adesso ?? (() => performance.now())
+    this.suCambioGeometria = opzioni.suCambioGeometria ?? null
     this.spezzatore = new SpezzatoreAnnexB((unita, chiave) => this.emettiUnita(unita, chiave))
   }
 
@@ -158,7 +182,28 @@ export class MuxTs {
     this.spezzatore.chiudi()
   }
 
+  /**
+   * Un'unita di accesso gia spezzata, da un muxer che ha appena tagliato
+   * (ADR 0012): entra nella linea temporale di QUESTO muxer come se l'avesse
+   * spezzata lui. La prima e sempre il fotogramma chiave con la geometria
+   * nuova, quindi fissa lo zero e la geometria del segmento.
+   */
+  accetta(unita: Uint8Array, chiave: boolean): void {
+    this.emettiUnita(unita, chiave)
+  }
+
+  /** I byte non ancora emessi dallo spezzatore: per il passaggio di consegne. */
+  residuo(): Uint8Array {
+    return this.spezzatore.residuo()
+  }
+
   private emettiUnita(unita: Uint8Array, chiave: boolean): void {
+    // Dopo un taglio le unita vanno al segmento nuovo, non a questo: lo
+    // spezzatore di qui resta l'unico ad avere in pancia i byte a cavallo.
+    if (this.successore) {
+      this.successore.accetta(unita, chiave)
+      return
+    }
     // Prima del primo fotogramma chiave non esce NIENTE. La registrazione
     // comincia quasi sempre a meta GOP (il gestore consegna i byte da dove si
     // trova lo stream), e quei P-frame senza riferimenti nessuno li decodifica.
@@ -172,6 +217,27 @@ export class MuxTs {
     if (!this.chiaveVista) {
       if (!chiave) return
       this.chiaveVista = true
+    }
+
+    // La rete di sicurezza (ADR 0012): l'SPS viaggia col fotogramma chiave
+    // (annexb.ts, misurato), quindi e qui che una geometria nuova si vede. Il
+    // confronto e sulla geometria, non sui byte: un SPS ri-inviato identico o
+    // un cambio di solo PPS non tagliano niente. Se nessuno gestisce il taglio
+    // (o il taglio fallisce), si aggiorna il riferimento e si continua: meglio
+    // un file che i lettori rigidi bloccano che nessun file.
+    if (chiave) {
+      const g = geometriaDi(unita)
+      if (g !== null) {
+        if (this.geometria !== null && g !== this.geometria && this.suCambioGeometria) {
+          const successore = this.suCambioGeometria(this.geometria, g)
+          if (successore) {
+            this.successore = successore
+            successore.accetta(unita, chiave)
+            return
+          }
+        }
+        this.geometria = g
+      }
     }
 
     const ora = this.adesso()

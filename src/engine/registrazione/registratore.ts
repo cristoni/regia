@@ -140,6 +140,21 @@ export class Registratore {
 
     await fs.mkdir(p.registrazione.cartella, { recursive: true })
 
+    // ADR 0012: prima che i byte comincino a scorrere si fissa la risoluzione,
+    // perche con `streamRes: "auto"` il telefono cambia geometria a meta stream
+    // e un `-c:v copy` che cambia dimensione blocca i lettori rigidi. Se il
+    // comando fallisce si registra lo stesso: il taglio-segmento del MuxTs
+    // copre il cambio, e un file in piu batte nessun file.
+    try {
+      await this.opzioni.telecamere.fissaRisoluzione(t)
+    } catch (e) {
+      this.opzioni.suDiario(
+        'attenzione',
+        `Non sono riuscito a fissare la risoluzione di "${t.nome}" (${(e as Error).message}): ` +
+          'registro comunque; se la geometria cambia a meta, il segmento si taglia da solo.',
+      )
+    }
+
     const inCorso: InCorso = {
       ffmpeg: null,
       mux: null,
@@ -204,14 +219,24 @@ export class Registratore {
           this.opzioni.suDiario('info', `Registrazione di "${t.nome}" ripresa su un file nuovo.`)
         }
         const f = inCorso.ffmpeg
-        if (!f || f.stdin.destroyed || !inCorso.mux) return
+        const mux = inCorso.mux
+        if (!f || f.stdin.destroyed || !mux) return
         // I byte grezzi H.264 passano dal muxer, che trattiene tutto fino al
         // primo fotogramma chiave e poi impacchetta ogni unita di accesso in
         // MPEG-TS con un PTS nostro. E' lui a scrivere sullo stdin di ffmpeg
         // (via il callback impostato in apriFfmpeg) -- ed e li, alla prima
         // emissione, che parte anche la pompa dell'audio: i due zeri devono
         // coincidere.
-        inCorso.mux.spingi(d)
+        mux.spingi(d)
+        // Un cambio di geometria dentro `spingi` sostituisce il muxer (vedi
+        // suCambioGeometria in apriFfmpeg). Le unita complete del pacchetto le
+        // ha gia inoltrate il muxer vecchio; il pezzo di NAL che gli resta in
+        // pancia passa qui al nuovo, cosi il fotogramma a cavallo del taglio
+        // non si perde.
+        if (inCorso.mux !== mux && inCorso.mux) {
+          const resto = mux.residuo()
+          if (resto.length > 0) inCorso.mux.spingi(resto)
+        }
       },
       caduto: (motivo) => {
         if (inCorso.chiudendo) return
@@ -369,6 +394,28 @@ export class Registratore {
       scrivi: (ts) => {
         inCorso.pompa?.avvia()
         if (!f.stdin.destroyed) f.stdin.write(Buffer.from(ts))
+      },
+      // La rete di sicurezza dell'ADR 0012: anche con la risoluzione fissata,
+      // uno switch che sfugge non deve produrre un file muto e bloccato. Si
+      // riusa il ciclo caduta->ripresa: si chiude QUESTO ffmpeg (bene, col
+      // `moov`) e se ne apre subito un altro, con un muxer nuovo che riparte
+      // da zero e un `avcC` nuovo. Il muxer vecchio non si chiude: sta ancora
+      // spezzando il pacchetto in corso, e cio che ne esce lo inoltra al
+      // successore che si restituisce da qui. Cosi una ripresa con switch
+      // diventa due file leggibili invece di uno rotto.
+      suCambioGeometria: (da, a) => {
+        if (inCorso.chiudendo || this.attive.get(telecameraId) !== inCorso) return null
+        this.opzioni.suDiario(
+          'attenzione',
+          `Video di "${t.nome}" passato da ${da} a ${a}: chiudo il segmento e continuo su un file nuovo.`,
+        )
+        // Si azzera `mux` PRIMA di chiudere: `chiudiFfmpeg` chiuderebbe anche
+        // il muxer, e il suo spezzatore -- che in questo istante e sul nostro
+        // stack -- perderebbe i byte a cavallo del taglio.
+        inCorso.mux = null
+        void this.chiudiFfmpeg(inCorso)
+        this.apriFfmpeg(telecameraId, inCorso)
+        return inCorso.mux
       },
     })
     inCorso.inAttesa = false

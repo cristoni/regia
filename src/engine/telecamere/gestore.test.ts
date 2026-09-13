@@ -135,3 +135,47 @@ describe('il preset di una Telecamera', () => {
     }
   })
 })
+
+/**
+ * ADR 0012: all'accensione del REC Regia fissa la geometria, perche con
+ * `streamRes: "auto"` il telefono la cambia a meta stream e un `-c:v copy`
+ * che cambia dimensione blocca i lettori rigidi. Serve la forma `WxH`: le
+ * etichette `low|medium|high` lasciano vivo l'adattamento.
+ */
+describe('la risoluzione fissata per la ripresa (ADR 0012)', () => {
+  it('invia resolution=1280x720 e lo scrive nel Diario', async () => {
+    const finto = await telefonoFinto()
+    const righe: string[] = []
+    const g = gestore(righe)
+    try {
+      await g.fissaRisoluzione(telecamera(finto.porta))
+      assert.ok(
+        finto.chieste.some((c) => /^\/\?resolution=1280x720$/.test(c)),
+        `manca il comando della risoluzione: ${JSON.stringify(finto.chieste)}`,
+      )
+      assert.ok(
+        righe.some((r) => /1280x720/.test(r)),
+        `il Diario non lo dice: ${JSON.stringify(righe)}`,
+      )
+    } finally {
+      await g.chiudi()
+      await finto.chiudi()
+    }
+  })
+
+  /**
+   * Qui l'errore si propaga, al contrario della torcia del preset: e il
+   * registratore a decidere che si registra lo stesso (col taglio-segmento a
+   * fare da rete), e per deciderlo deve sapere che il comando e fallito.
+   */
+  it('propaga l errore se il telefono rifiuta il comando', async () => {
+    const finto = await telefonoFinto(/resolution/)
+    const g = gestore([])
+    try {
+      await assert.rejects(() => g.fissaRisoluzione(telecamera(finto.porta)), /risposto 500/)
+    } finally {
+      await g.chiudi()
+      await finto.chiudi()
+    }
+  })
+})

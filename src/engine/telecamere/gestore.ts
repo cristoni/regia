@@ -58,6 +58,13 @@ export interface OpzioniGestore {
   readonly password: (t: Telecamera) => string | null
 }
 
+/**
+ * La geometria che Regia impone al telefono durante la registrazione
+ * (ADR 0012): nativa sull'obiettivo del telefono nuovo, standard ovunque.
+ * Concreta apposta -- un valore `WxH` spegne l'adattamento, un'etichetta no.
+ */
+export const RISOLUZIONE_RIPRESA = '1280x720'
+
 /** Ogni quanto si chiede a ogni telefono come sta. */
 const CADENZA_INFO_MS = 3000
 /** Quanto si aspetta prima di riaprire un flusso caduto. */
@@ -316,23 +323,6 @@ export class GestoreTelecamere {
   }
 
   /**
-   * Rimette la Telecamera nello stato che Regia si aspetta.
-   *
-   * Sul telefono **niente torna ai default da solo**: streaming, risoluzione,
-   * zoom, rotazione e torcia restano come li ha lasciati l'ultima volta, anche
-   * dopo un riavvio. Quindi non si da per scontato nulla di cio che Regia usa.
-   *
-   * Oggi il preset e di due voci, e sono le due che Regia cambia davvero:
-   * lo streaming acceso, e la **torcia spenta**. La torcia conta piu di quanto
-   * sembri: Identifica la accende, e se Regia muore nei due secondi in cui e
-   * accesa, quel telefono resta con la luce addosso per sempre -- in una stanza
-   * al buio, dentro una casa degli orrori. Riaprire il progetto la spegne.
-   *
-   * Risoluzione, zoom e rotazione non stanno nel preset perche non stanno nel
-   * dominio: `zTelecamera` non li ha, e Regia non li tocca mai. Il giorno in cui
-   * entrano nel progetto, entrano anche qui.
-   */
-  /**
    * Apre `/audio` di una Telecamera, per la registrazione.
    *
    * Passa da qui e non dal registratore perche le credenziali del telefono
@@ -359,6 +349,26 @@ export class GestoreTelecamere {
     }
   }
 
+  /**
+   * Rimette la Telecamera nello stato che Regia si aspetta.
+   *
+   * Sul telefono **niente torna ai default da solo**: streaming, risoluzione,
+   * zoom, rotazione e torcia restano come li ha lasciati l'ultima volta, anche
+   * dopo un riavvio. Quindi non si da per scontato nulla di cio che Regia usa.
+   *
+   * Oggi il preset e di due voci, e sono le due che Regia cambia davvero:
+   * lo streaming acceso, e la **torcia spenta**. La torcia conta piu di quanto
+   * sembri: Identifica la accende, e se Regia muore nei due secondi in cui e
+   * accesa, quel telefono resta con la luce addosso per sempre -- in una stanza
+   * al buio, dentro una casa degli orrori. Riaprire il progetto la spegne.
+   *
+   * Zoom e rotazione non stanno nel preset perche non stanno nel dominio:
+   * `zTelecamera` non li ha, e Regia non li tocca mai. La risoluzione era
+   * nella stessa frase fino all'ADR 0012: ora Regia la tocca, ma solo a
+   * runtime e solo durante il REC (`fissaRisoluzione`), quindi nel preset
+   * continua a non stare. Il giorno in cui una di queste voci entra nel
+   * progetto, entra anche qui.
+   */
   async preparaTelecamera(t: Telecamera): Promise<void> {
     const a = this.accesso(t)
     // Lo streaming e la ragione per cui la Telecamera esiste: se non si accende
@@ -377,6 +387,30 @@ export class GestoreTelecamere {
           'Se il telefono non ha il flash, e normale.',
       )
     }
+  }
+
+  /**
+   * Fissa la risoluzione per la durata della ripresa (ADR 0012).
+   *
+   * Con `streamRes: "auto"` il telefono cambia geometria a meta stream, e una
+   * registrazione `-c:v copy` che cambia dimensione a meta si blocca nei
+   * lettori rigidi. Serve la forma `WxH`, non `low|medium|high`: le etichette
+   * toccano solo il *target* di `auto` e lasciano vivo l'adattamento (letto in
+   * `StreamingService.kt`, fatti verificati). Durante il REC questa scelta
+   * vince su un `auto` impostato a mano dall'operatore -- la stabilita batte
+   * la preferenza adattiva, e il Diario lo dice. A fine REC non si ripristina
+   * niente, coerente col preset: il telefono resta come Regia l'ha lasciato.
+   */
+  async fissaRisoluzione(t: Telecamera): Promise<void> {
+    const prima = this.viste.get(t.id)?.dettagli?.risoluzione
+    await comanda(this.accesso(t), { resolution: RISOLUZIONE_RIPRESA })
+    this.opzioni.suDiario(
+      'info',
+      prima === 'auto'
+        ? `Risoluzione di "${t.nome}" fissata a ${RISOLUZIONE_RIPRESA} per la ripresa: ` +
+            'una registrazione vuole una geometria stabile, e vince su "auto".'
+        : `Risoluzione di "${t.nome}" fissata a ${RISOLUZIONE_RIPRESA} per la ripresa.`,
+    )
   }
 
   // ------------------------------------------------------------- interni

@@ -40,11 +40,11 @@ async function cartella(): Promise<string> {
  * di `ultrafast` lo spezzatore emetterebbe piu' unita per fotogramma, che non e'
  * il caso reale.
  */
-function generaH264(dest: string): void {
+function generaH264(dest: string, size = '320x240'): void {
   const e = spawnSync(
     ffmpeg,
     ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
-     '-i', 'testsrc2=rate=30:size=320x240:duration=2',
+     '-i', `testsrc2=rate=30:size=${size}:duration=2`,
      '-c:v', 'libx264', '-preset', 'ultrafast', '-bf', '0', '-g', '15',
      '-x264-params', 'slices=1:sliced-threads=0',
      '-f', 'h264', '-y', dest],
@@ -164,5 +164,124 @@ describe('muxer MPEG-TS: da byte H.264 a TS con PTS nostri', { skip: undefined }
     const n = execFileSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0', '-count_packets',
       '-show_entries', 'stream=nb_read_packets', '-of', 'csv=p=0', mp4]).toString().trim()
     assert.ok(Number(n) >= 58, `l mp4 copiato deve avere ~60 fotogrammi, ne ha ${n}`)
+  })
+})
+
+/**
+ * La rete di sicurezza dell'ADR 0012: un cambio di geometria a meta stream
+ * deve tagliare un segmento nuovo. Qui si imita il registratore alla lettera:
+ * i byte si spingono nel muxer corrente; quando `suCambioGeometria` lo
+ * sostituisce, il residuo del vecchio passa al nuovo. Il collaudo e con
+ * ffprobe, come sopra: due file veri, ciascuno con la sua geometria.
+ */
+describe('taglio-segmento su un cambio di geometria (ADR 0012)', () => {
+  function geometriaLetta(file: string): string {
+    // In un TS ffprobe elenca la stessa traccia due volte (nel programma e
+    // fuori): la geometria e la prima riga non vuota.
+    const csv = execFileSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file]).toString()
+    return csv.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? ''
+  }
+  function fotogrammi(file: string): { pts: number; chiave: boolean }[] {
+    const csv = execFileSync(ffprobe, ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', file]).toString()
+    return csv.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
+      const [pts, flag] = l.split(',')
+      return { pts: parseFloat(pts!), chiave: /K/.test(flag ?? '') }
+    })
+  }
+
+  it('due geometrie diventano due segmenti leggibili, il secondo parte dal chiave nuovo', async (t) => {
+    if (!ffmpeg || !ffprobe) return t.skip('ffmpeg/ffprobe non disponibili')
+    const dir = await cartella()
+    const a = path.join(dir, 'a.h264')
+    const b = path.join(dir, 'b.h264')
+    generaH264(a, '320x240')
+    generaH264(b, '480x360')
+    const byte = new Uint8Array(Buffer.concat([await fs.readFile(a), await fs.readFile(b)]))
+
+    let orologio = 0
+    const adesso = (): number => (orologio += 1000 / 30)
+    const pezzi1: Uint8Array[] = []
+    const pezzi2: Uint8Array[] = []
+    const tagli: string[] = []
+    let corrente: MuxTs
+    const mux1 = new MuxTs({
+      scrivi: (ts) => pezzi1.push(ts),
+      adesso,
+      suCambioGeometria: (da, aGeo) => {
+        tagli.push(`${da}->${aGeo}`)
+        corrente = new MuxTs({ scrivi: (ts) => pezzi2.push(ts), adesso })
+        return corrente
+      },
+    })
+    corrente = mux1
+
+    // Come nel registratore: al taglio, il residuo del muxer vecchio passa al
+    // nuovo, cosi il fotogramma a cavallo non si perde.
+    for (let i = 0; i < byte.length; i += 1500) {
+      const prima = corrente
+      prima.spingi(byte.subarray(i, i + 1500))
+      if (corrente !== prima) {
+        const resto = prima.residuo()
+        if (resto.length > 0) corrente.spingi(resto)
+      }
+    }
+    corrente.chiudi()
+
+    assert.deepEqual(tagli, ['320x240->480x360'], 'un taglio solo, con le geometrie giuste')
+
+    const seg1 = path.join(dir, 'seg1.ts')
+    const seg2 = path.join(dir, 'seg2.ts')
+    await fs.writeFile(seg1, Buffer.concat(pezzi1.map((p) => Buffer.from(p))))
+    await fs.writeFile(seg2, Buffer.concat(pezzi2.map((p) => Buffer.from(p))))
+
+    assert.equal(geometriaLetta(seg1), '320,240')
+    assert.equal(geometriaLetta(seg2), '480,360')
+
+    const f1 = fotogrammi(seg1)
+    const f2 = fotogrammi(seg2)
+    // Il primo segmento tiene tutti i 60 fotogrammi della prima geometria;
+    // il secondo parte ESATTAMENTE dal chiave che ha cambiato geometria (PTS
+    // riportato a zero) e perde solo l'ultimo, trattenuto da `chiudi`.
+    assert.ok(f1.length >= 59, `attesi ~60 fotogrammi nel primo segmento, letti ${f1.length}`)
+    assert.ok(f2.length >= 58, `attesi ~59 fotogrammi nel secondo segmento, letti ${f2.length}`)
+    assert.ok(f1.length + f2.length >= 118, `persi troppi fotogrammi al taglio: ${f1.length}+${f2.length}`)
+    assert.equal(f2[0]!.chiave, true, 'il secondo segmento deve partire da un fotogramma chiave')
+    assert.ok(f2[0]!.pts < 0.05, `la linea temporale del secondo segmento riparte da ~0, era ${f2[0]!.pts}`)
+    for (let i = 1; i < f2.length; i++) {
+      assert.ok(f2[i]!.pts > f2[i - 1]!.pts, `PTS non monotono nel secondo segmento a ${i}`)
+    }
+  })
+
+  it('lo stesso SPS ri-inviato non taglia: la regola e sulla geometria, non sui byte', async (t) => {
+    if (!ffmpeg || !ffprobe) return t.skip('ffmpeg/ffprobe non disponibili')
+    const dir = await cartella()
+    const a = path.join(dir, 'a.h264')
+    generaH264(a, '320x240')
+    const uno = await fs.readFile(a)
+    // Lo stesso flusso due volte: il secondo ricomincia da SPS+PPS+IDR, cioe
+    // un SPS ri-inviato con la stessa geometria. Non deve succedere niente.
+    const byte = new Uint8Array(Buffer.concat([uno, uno]))
+
+    let orologio = 0
+    const pezzi: Uint8Array[] = []
+    const tagli: string[] = []
+    const mux = new MuxTs({
+      scrivi: (ts) => pezzi.push(ts),
+      adesso: () => (orologio += 1000 / 30),
+      suCambioGeometria: (da, aGeo) => {
+        tagli.push(`${da}->${aGeo}`)
+        return null
+      },
+    })
+    for (let i = 0; i < byte.length; i += 1500) mux.spingi(byte.subarray(i, i + 1500))
+    mux.chiudi()
+
+    assert.deepEqual(tagli, [], 'nessun taglio su una geometria che non cambia')
+    const tsFile = path.join(dir, 'out.ts')
+    await fs.writeFile(tsFile, Buffer.concat(pezzi.map((p) => Buffer.from(p))))
+    const n = fotogrammi(tsFile).length
+    assert.ok(n >= 118, `attesi ~119 fotogrammi in un segmento unico, letti ${n}`)
   })
 })

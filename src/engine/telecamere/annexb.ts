@@ -23,6 +23,7 @@
 /** Tipi di NAL che ci interessano. Il resto passa e basta. */
 const NAL_SLICE = 1
 const NAL_IDR = 5
+const NAL_SPS = 7
 
 export class SpezzatoreAnnexB {
   /** Byte non ancora attribuiti a una NAL completa. */
@@ -65,6 +66,20 @@ export class SpezzatoreAnnexB {
     this.conChiave = false
   }
 
+  /**
+   * I byte gia ricevuti ma non ancora emessi: le NAL complete dell'unita in
+   * costruzione, piu la coda che non e ancora una NAL intera.
+   *
+   * Serve al taglio-segmento della registrazione (ADR 0012): quando un cambio
+   * di geometria sostituisce il muxer a meta pacchetto, questi byte si
+   * ridanno in pasto al nuovo, cosi il fotogramma a cavallo del taglio non si
+   * perde. Sono Annex-B validi (le NAL portano i propri codici di avvio):
+   * ripassarli da `spingi` ricostruisce lo stato del parser esattamente.
+   */
+  residuo(): Buffer {
+    return Buffer.concat([...this.unita, this.resto])
+  }
+
   private aggiungi(nal: Buffer): void {
     const lunghezzaCodice = nal[2] === 1 ? 3 : 4
     const testa = nal[lunghezzaCodice]
@@ -98,4 +113,152 @@ function trovaCodice(b: Buffer, da: number): number {
     if (b[i + 2] === 0 && b[i + 3] === 1) return i
   }
   return -1
+}
+
+/**
+ * La geometria (`"1280x720"`) dichiarata dall'SPS di un'unita di accesso, o
+ * `null` se l'unita non ha un SPS leggibile.
+ *
+ * Serve alla rete di sicurezza della registrazione (ADR 0012): con `-c:v copy`
+ * il contenitore dichiara una sola dimensione, e un cambio di geometria a meta
+ * blocca i lettori rigidi -- il muxer confronta la geometria di ogni fotogramma
+ * chiave con quella del segmento in corso. Il confronto e sulla geometria, non
+ * sui byte dell'SPS: un ri-invio identico o un cambio di solo PPS non contano.
+ *
+ * Si legge solo quel che serve ad arrivare a `pic_width_in_mbs` e al cropping
+ * (spec H.264 §7.3.2.1.1), su una copia senza i byte di prevenzione
+ * dell'emulazione (`00 00 03` -> `00 00`). Qualunque inciampo restituisce
+ * `null`: un SPS che non si riesce a leggere non deve far cadere la ripresa.
+ */
+export function geometriaDi(unita: Uint8Array): string | null {
+  const b = Buffer.from(unita.buffer, unita.byteOffset, unita.byteLength)
+  let inizio = trovaCodice(b, 0)
+  while (inizio >= 0) {
+    const lunghezzaCodice = b[inizio + 2] === 1 ? 3 : 4
+    const testa = b[inizio + lunghezzaCodice]
+    const fine = trovaCodice(b, inizio + 3)
+    if (testa !== undefined && (testa & 0x1f) === NAL_SPS) {
+      const nal = b.subarray(inizio + lunghezzaCodice, fine < 0 ? b.length : fine)
+      try {
+        return leggiGeometriaSps(nal)
+      } catch {
+        return null
+      }
+    }
+    inizio = fine
+  }
+  return null
+}
+
+/** I byte RBSP di una NAL: via l'intestazione e i `00 00 03` -> `00 00`. */
+function rbsp(nal: Buffer): Buffer {
+  const out = Buffer.alloc(nal.length - 1)
+  let n = 0
+  for (let i = 1; i < nal.length; i++) {
+    if (i + 2 < nal.length && nal[i] === 0 && nal[i + 1] === 0 && nal[i + 2] === 3) {
+      out[n++] = 0
+      out[n++] = 0
+      i += 2
+      continue
+    }
+    out[n++] = nal[i]!
+  }
+  return out.subarray(0, n)
+}
+
+class LettoreBit {
+  private pos = 0
+  constructor(private readonly b: Buffer) {}
+  bit(): number {
+    const byte = this.b[this.pos >> 3]
+    if (byte === undefined) throw new Error('SPS troncato')
+    const v = (byte >> (7 - (this.pos & 7))) & 1
+    this.pos++
+    return v
+  }
+  bits(n: number): number {
+    let v = 0
+    for (let i = 0; i < n; i++) v = (v << 1) | this.bit()
+    return v
+  }
+  /** Exp-Golomb senza segno: `zeri` bit a 0, un 1, `zeri` bit di valore. */
+  ue(): number {
+    let zeri = 0
+    while (this.bit() === 0) if (++zeri > 31) throw new Error('non e Exp-Golomb')
+    return (1 << zeri) - 1 + this.bits(zeri)
+  }
+  se(): number {
+    const k = this.ue()
+    return k % 2 === 0 ? -(k / 2) : (k + 1) / 2
+  }
+}
+
+/** Profili che portano `chroma_format_idc` e compagnia (spec, §7.3.2.1.1). */
+const PROFILI_ESTESI = new Set([100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135])
+
+function leggiGeometriaSps(nal: Buffer): string {
+  const r = new LettoreBit(rbsp(nal))
+  const profilo = r.bits(8)
+  r.bits(8) // constraint flag e riserva
+  r.bits(8) // level_idc
+  r.ue() // seq_parameter_set_id
+
+  let chroma = 1 // 4:2:0, il default dei profili senza il campo
+  let planiSeparati = 0
+  if (PROFILI_ESTESI.has(profilo)) {
+    chroma = r.ue()
+    if (chroma === 3) planiSeparati = r.bit()
+    r.ue() // bit_depth_luma_minus8
+    r.ue() // bit_depth_chroma_minus8
+    r.bit() // qpprime_y_zero_transform_bypass_flag
+    if (r.bit() === 1) {
+      // seq_scaling_matrix: liste da saltare per intero, contando come la spec
+      for (let i = 0; i < (chroma !== 3 ? 8 : 12); i++) {
+        if (r.bit() === 0) continue
+        const dimensione = i < 6 ? 16 : 64
+        let ultimo = 8
+        let prossimo = 8
+        for (let j = 0; j < dimensione; j++) {
+          if (prossimo !== 0) prossimo = (ultimo + r.se() + 256) % 256
+          ultimo = prossimo === 0 ? ultimo : prossimo
+        }
+      }
+    }
+  }
+
+  r.ue() // log2_max_frame_num_minus4
+  const tipoPoc = r.ue()
+  if (tipoPoc === 0) {
+    r.ue() // log2_max_pic_order_cnt_lsb_minus4
+  } else if (tipoPoc === 1) {
+    r.bit() // delta_pic_order_always_zero_flag
+    r.se() // offset_for_non_ref_pic
+    r.se() // offset_for_top_to_bottom_field
+    const cicli = r.ue()
+    for (let i = 0; i < cicli; i++) r.se()
+  }
+  r.ue() // max_num_ref_frames
+  r.bit() // gaps_in_frame_num_value_allowed_flag
+
+  const larghezzaMb = r.ue() + 1
+  const altezzaMappa = r.ue() + 1
+  const soloFrame = r.bit()
+  if (soloFrame === 0) r.bit() // mb_adaptive_frame_field_flag
+  r.bit() // direct_8x8_inference_flag
+
+  let larghezza = larghezzaMb * 16
+  let altezza = (2 - soloFrame) * altezzaMappa * 16
+  if (r.bit() === 1) {
+    // frame_cropping: le unita di ritaglio dipendono dal sottocampionamento
+    const sinistra = r.ue()
+    const destra = r.ue()
+    const sopra = r.ue()
+    const sotto = r.ue()
+    const tipoChroma = planiSeparati === 1 ? 0 : chroma
+    const unitaX = tipoChroma === 0 || tipoChroma === 3 ? 1 : 2
+    const unitaY = (tipoChroma === 1 ? 2 : 1) * (2 - soloFrame)
+    larghezza -= unitaX * (sinistra + destra)
+    altezza -= unitaY * (sopra + sotto)
+  }
+  return `${larghezza}x${altezza}`
 }

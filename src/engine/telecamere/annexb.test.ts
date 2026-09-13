@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { SpezzatoreAnnexB } from './annexb.js'
+import { SpezzatoreAnnexB, geometriaDi } from './annexb.js'
 
 /** Una NAL finta: codice di avvio, intestazione col tipo, e del riempimento. */
 function nal(tipo: number, riempimento = 8, corto = false): Buffer {
@@ -89,5 +89,64 @@ describe('spezzatore Annex-B', () => {
     const { spezzatore, unita } = raccogli()
     for (let i = 0; i < 200; i++) spezzatore.spingi(Buffer.alloc(64 * 1024, 0x41))
     assert.equal(unita.length, 0)
+  })
+
+  /**
+   * Il passaggio di consegne del taglio-segmento (ADR 0012): il residuo di uno
+   * spezzatore, ridato in pasto a uno nuovo, deve ricostruirne lo stato
+   * esattamente -- le stesse unita devono uscire, ovunque cada il taglio.
+   */
+  it('residuo + spezzatore nuovo = le stesse unita, ovunque cada il taglio', () => {
+    const flusso = Buffer.concat([nal(SPS), nal(PPS), nal(IDR, 40), nal(SLICE, 40), nal(SLICE), nal(SLICE)])
+    const riferimento = raccogli()
+    riferimento.spezzatore.spingi(flusso)
+
+    for (let taglio = 1; taglio < flusso.length; taglio++) {
+      const primo = raccogli()
+      primo.spezzatore.spingi(flusso.subarray(0, taglio))
+      const secondo = raccogli()
+      secondo.spezzatore.spingi(primo.spezzatore.residuo())
+      secondo.spezzatore.spingi(flusso.subarray(taglio))
+      assert.deepEqual(
+        [...primo.unita, ...secondo.unita],
+        riferimento.unita,
+        `il taglio a ${taglio} cambia le unita emesse`,
+      )
+    }
+  })
+})
+
+/**
+ * SPS veri, generati con libx264 (`ffmpeg -f lavfi -i color=black:size=WxH
+ * -c:v libx264 -profile:v ...`) ed estratti dal flusso: gli hex qui sotto sono
+ * la NAL SPS cosi com'e, coi byte di prevenzione dell'emulazione dentro
+ * (`00 00 03` compare in tutti). Coprono il profilo esteso e il baseline, e le
+ * geometrie che vogliono il cropping (1080 e 300 non sono multipli di 16).
+ */
+describe('geometriaDi: la geometria dichiarata dall SPS (ADR 0012)', () => {
+  const casi: [string, string, string][] = [
+    ['1280x720', 'high', '6764001facd9405005bb0110000003001000000303c0f1831960'],
+    ['800x608', 'high', '6764001facd940c8136c0440000003004000000f03c60c6580'],
+    ['1920x1080', 'high (crop verticale)', '67640028acd940780227e5c044000003000400000300f03c60c658'],
+    ['300x180', 'high (crop orizzontale)', '6764000dacd941319ee7c044000003000400000300f03c50a658'],
+    ['640x360', 'baseline', '6742c01ed900a02ff970110000030001000003003c0f162e48'],
+  ]
+
+  for (const [geometria, profilo, hex] of casi) {
+    it(`legge ${geometria} da un SPS ${profilo}`, () => {
+      const unita = Buffer.concat([Buffer.from([0, 0, 0, 1]), Buffer.from(hex, 'hex'), nal(PPS), nal(IDR)])
+      assert.equal(geometriaDi(unita), geometria)
+    })
+  }
+
+  it('restituisce null su un unita senza SPS', () => {
+    assert.equal(geometriaDi(Buffer.concat([nal(PPS), nal(IDR)])), null)
+  })
+
+  it('restituisce null su un SPS illeggibile, senza lanciare', () => {
+    // Un "SPS" che e solo intestazione e spazzatura: il parser deve arrendersi
+    // in silenzio -- un SPS strano non deve far cadere la ripresa.
+    const rotto = Buffer.concat([Buffer.from([0, 0, 0, 1, 0x67]), Buffer.alloc(3, 0)])
+    assert.equal(geometriaDi(rotto), null)
   })
 })

@@ -869,3 +869,59 @@ contenuto A/V e il comportamento contro la telecamera vera (irraggiungibile in q
   finto ascoltatore compare il riquadro d'errore e il processo muore invece di fare lo zombie;
   con la porta libera il portabile apre la finestra (4 processi, `MainWindowTitle` «Regia»,
   7333 in ascolto dal pid giusto) e la X la chiude pulita, stub NSIS compreso.
+
+## Registrazioni difettose dalla prova reale, misurato il 13 settembre 2026
+
+La prova del committente (rete Wi-Fi dedicata, PC + due telefoni, due registrazioni in
+contemporanea) ha dato un file buono dal telefono vecchio (5 s di silenzio in testa, resto ok) e
+uno inutilizzabile dal telefono nuovo (video bloccato, audio robotico). Tutte le misure sotto sono
+fatte contro i telefoni veri (`.7` = nuovo, Pixel a sensore 4K, obiettivo attivo `0:2`; `.16` =
+l'altro), riproducendo la pipeline di registrazione con i moduli veri `MuxTs`/`PompaAudio`.
+
+- **[misurato]** **Il silenzio in testa (~5 s) è una corsa fra l'orologio della pompa e il
+  collegamento di ffmpeg.** `PompaAudio.avvia()` fa partire `inizioMs` sul primo keyframe, ma
+  ffmpeg apre gli ingressi in sequenza: sonda l'MPEG-TS su `pipe:0` (default `analyzeduration` ~5 s)
+  e **solo dopo** apre l'ingresso audio. Misurato: `avvia()` a ~1300 ms, ffmpeg connesso alla socket
+  audio a ~6500 ms; `(connect − avvia) = 5203 ms`, e `silenzio inventato + 500 ms di coda = 5222 ms`
+  — coincidono al millisecondo su più esecuzioni. Per quei ~5 s `giro()` esce subito (`!this.presa`)
+  ma l'orologio avanza; al collegamento il debito è ~5 s, la coda ne tiene 500 ms, il resto esce come
+  un unico blocco di silenzio in testa.
+- **[misurato]** **La cura è accorciare il sondaggio di ffmpeg, non spostare lo zero dell'audio.**
+  Con `-analyzeduration 200000 -probesize 100000` sull'ingresso `pipe:0`, `(connect − avvia)` scende
+  a ~516 ms, il collegamento cade dentro i 500 ms di coda, e il **silenzio inventato va a 0,00 s**;
+  tracce 13,94 s video / 13,83 s audio (scarto 110 ms). Ancorare invece `inizioMs` al collegamento
+  eliminerebbe il silenzio ma sfaserebbe l'audio di ~5 s in avanti (lo zero del video resta al primo
+  keyframe): il comportamento attuale mantiene la sincronia, perde solo i 5 s iniziali. Il
+  `probesize` va tenuto sopra un keyframe (un IDR a 1280×720 è grande).
+- **[misurato]** **Il telefono nuovo cambia risoluzione a metà stream con `streamRes` adattivo.**
+  In 30 s di `/video/h264` da `.16` (ad `auto`) compaiono due SPS distinti, **960×720 e 800×608**; da
+  `.7` due geometrie, **1024×576 e 720×480**. La struttura resta pulita (`7,8,5` a ogni keyframe, una
+  slice per fotogramma). Lo switch è **intermittente**, guidato dalla luce via l'auto-fps: alcune
+  finestre da 20-30 s non lo mostrano.
+- **[misurato]** **Fissare una risoluzione concreta blocca la geometria a una sola.** Inviato
+  `/?resolution=WxH`: su `.16` a 960×720 → 30 SPS su 30 s tutti 960×720 byte-identici; su `.7`
+  provati 960×720, 1280×720, 800×608 → ciascuno una sola geometria su 20 s. `.7` regge anche 960×720
+  benché non sia tra le native del suo obiettivo, ma **1280×720 è nativo** ed è la scelta adottata.
+- **[sorgente]** **Il contratto del parametro risoluzione di android-ip-camera** (letto in
+  `StreamingService.kt`, `desiredSize()` e l'endpoint di controllo): `?resolution=WxH` scrive la
+  preferenza `stream_res` (concreta); `?resolution=low|medium|high` tocca solo il *target* di
+  `stream_res="auto"` (`low`→800×600, `medium`→960×720, `high`→1280×720); `?resolution=auto|max`
+  rimette l'adattivo. Con `auto`, la `ResolutionStrategy` della camera (`FALLBACK_CLOSEST_HIGHER_THEN_LOWER`
+  + `PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE`) sceglie una nativa vicina al target e può cambiarla
+  a ogni rebind — da cui lo switch. Valori non riconosciuti tornano `200` ma vengono ignorati.
+- **[misurato]** **Il congelamento del video è dipendente dal lettore, non una corruzione.**
+  Iniettato uno switch a metà ripresa (`800×608 → 1280×720`): il file contiene le due geometrie, ma
+  ffmpeg lo decodifica pulito (reinizializza sull'SPS in-band; `-err_detect explode` = zero
+  corruzione). Il contenitore MP4 con `-c:v copy` dichiara però **una sola** dimensione (l'`avcC` del
+  primo keyframe): i lettori rigidi (Windows Media Player / Foto, pipeline hardware) la onorano e si
+  bloccano al cambio. È il sintomo visto dal committente.
+- **[misurato]** ⚠️ **L'audio robotico è un guasto a sé, indotto dal carico, NON collaterale del
+  video.** A singolo dispositivo l'audio è sempre liscio, anche iniettando lo switch. In **doppia
+  registrazione** (`.7`+`.16`), con geometria fissata e video pulito, l'audio di `.7` esce con
+  silenzio sparso (gap a 0,18 / 0,74 / 1,14 / 1,64 / 2,1 / 3,5 / 4,3 / 5,1 / 5,5 / 7,6 s…), 1,42 s
+  inventati in 60 s; `.16` nello stesso run 0 s. **Non è la rete**: sotto doppio carico video la
+  consegna audio di `.7` è nominale (2 inter-arrivi > 150 ms in 40 s) e la slittatura di un timer
+  100 ms è ≤ 16 ms. Causa probabile: contesa sul thread principale, dove la pompa convive con 2×
+  flussi video, 2× `MuxTs` e 2× scritture su stdin di ffmpeg — quando `campioni()` ritarda,
+  `ultimoCampioneIl` invecchia e `giro()` inietta silenzio (`quiete > PAZIENZA_MS`). **Cura non
+  ancora scelta** (vedi `.scratch/registrazioni-difettose/piano.md`, punto 5).
