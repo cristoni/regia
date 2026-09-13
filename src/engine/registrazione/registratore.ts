@@ -348,6 +348,21 @@ export class Registratore {
       // ~0) e il girato diventava una diapositiva + avanti-veloce. Con i PTS
       // vicini allo zero, nello stesso intervallo dell'audio, l'interleave
       // funziona. Misurato il 2026-09-11; vedi ts.ts e docs/fatti-verificati.md.
+      //
+      // Il sondaggio di QUESTO ingresso va tenuto corto: ffmpeg apre gli
+      // ingressi in sequenza, e col default (`analyzeduration` ~5 s, a ritmo
+      // reale) l'ingresso audio si apriva ~5 s dopo `pompa.avvia()`. Per quei
+      // 5 s l'orologio della pompa correva senza nessuno collegato, e al
+      // collegamento il debito usciva come un blocco di silenzio in testa alla
+      // traccia -- i «5 s di silenzio iniziale» della prova sul campo. Con
+      // questi valori il collegamento cade dentro i 500 ms di coda della pompa
+      // e il silenzio inventato misurato e' 0,00 s. Il `probesize` deve restare
+      // comodamente sopra un fotogramma chiave (un IDR a 1280x720 e' grande):
+      // il primo byte che ffmpeg vede e' sempre SPS+PPS+IDR (MuxTs), quindi
+      // 100 kB bastano e avanzano. Misurato il 2026-09-13; vedi
+      // docs/fatti-verificati.md e .scratch/registrazioni-difettose/piano.md.
+      '-analyzeduration', '200000',
+      '-probesize', '100000',
       '-f', 'mpegts',
       '-i', 'pipe:0',
       // Il secondo ingresso e la pompa, non il telefono: ffmpeg si collega a
