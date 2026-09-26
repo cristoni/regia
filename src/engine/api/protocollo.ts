@@ -75,6 +75,24 @@ export const zComando = z.discriminatedUnion('tipo', [
   z.object({ tipo: z.literal('telecamera.assegna'), telecameraId: z.string(), zonaId: z.string().nullable() }),
   z.object({ tipo: z.literal('telecamera.identifica'), telecameraId: z.string() }),
   /**
+   * Un Lampo: la torcia accesa per `durataMs` e poi spenta da Regia. Un Lampo
+   * nuovo sulla stessa Telecamera sostituisce quello in corso -- la torcia
+   * resta accesa e si spegne `durataMs` dopo l'ultimo. Il tetto e basso
+   * apposta: una torcia accesa per sbaglio in una stanza buia e il solo
+   * comando che fa danno da solo, e un Lampo non e un'illuminazione.
+   */
+  z.object({
+    tipo: z.literal('telecamera.lampo'),
+    telecameraId: z.string(),
+    durataMs: z.number().int().min(100).max(10_000),
+  }),
+  /**
+   * Il pulsante on/off: la torcia accesa finche non la si spegne, o spenta
+   * adesso. Accesa e un Lampo senza scadenza: un Lampo premuto dopo la
+   * riprende, e alla fine del suo tempo la spegne.
+   */
+  z.object({ tipo: z.literal('telecamera.torcia'), telecameraId: z.string(), accesa: z.boolean() }),
+  /**
    * Di quanto Regia gira l'immagine di questa Telecamera, in gradi orari
    * (ADR 0014). Non tocca il telefono: gira l'anteprima e scrive la rotazione
    * nel file registrato.
@@ -329,6 +347,15 @@ export interface TelecameraViva {
   readonly rotazione: 0 | 90 | 180 | 270
   /** Vero mentre la torcia lampeggia per Identifica. */
   readonly inIdentificazione: boolean
+  /**
+   * La durata del Lampo che tiene accesa la torcia **adesso**, o `null` se
+   * Regia non l'ha accesa. Serve a illuminare il pulsante giusto su tutte le
+   * interfacce collegate, non solo su quella che l'ha premuto. Anche
+   * Identifica e un Lampo, di due secondi.
+   */
+  readonly lampoMs: number | null
+  /** Vero se la torcia e accesa **fissa**, dal pulsante on/off: nessun timer la spegne. */
+  readonly torciaFissa: boolean
 }
 
 export interface StatoRegistrazione {

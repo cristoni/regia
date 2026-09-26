@@ -26,6 +26,8 @@ import {
   effettiDellaZona,
   inCorso,
   passoDelFlusso,
+  pulsanteTorcia,
+  pulsantiLampo,
   riepilogoSetup,
   righeAmbiente,
   ruotataDaPoco,
@@ -229,6 +231,78 @@ describe('la griglia video', () => {
       ],
     })
     assert.deepEqual(ruotateDiRecente(s, adesso).map((t) => t.id), ['t2', 't1'])
+  })
+})
+
+describe('i Lampi sulla cella', () => {
+  const conFlash = {
+    torcia: false, haFlash: true, risoluzione: '960x1280', fps: 20,
+    obiettivo: '0', obiettiviDisponibili: [], risoluzioniDisponibili: [],
+  }
+
+  it('sono tre, con le etichette chieste, dal piu corto al piu lungo', () => {
+    const p = pulsantiLampo(telecamera('t1', 'Ingresso', null, { dettagli: conFlash }))
+    assert.deepEqual(p.map((x) => x.etichetta), ['flash', '1 sec', '5 sec'])
+    assert.deepEqual(p.map((x) => x.durataMs), [300, 1000, 5000])
+    assert.ok(p.every((x) => !x.acceso && !x.disabilitato))
+  })
+
+  it('si illumina solo il Lampo in corso', () => {
+    // Con un "5 sec" acceso l'Operatore deve vedere che e il "5 sec", e che un
+    // "flash" adesso lo accorcerebbe.
+    const p = pulsantiLampo(telecamera('t1', 'Ingresso', null, { dettagli: conFlash, lampoMs: 5000 }))
+    assert.deepEqual(p.map((x) => x.acceso), [false, false, true])
+    assert.match(p[0]!.titolo, /gia accesa/)
+  })
+
+  it('Identifica accende la torcia ma nessun pulsante', () => {
+    const p = pulsantiLampo(telecamera('t1', 'Ingresso', null, { dettagli: conFlash, lampoMs: 2000 }))
+    assert.ok(p.every((x) => !x.acceso))
+    assert.ok(p.every((x) => /gia accesa/.test(x.titolo)))
+  })
+
+  it('si spengono su un telefono che non ha il flash o non risponde', () => {
+    const senza = pulsantiLampo(
+      telecamera('t1', 'Ingresso', null, { dettagli: { ...conFlash, haFlash: false } }),
+    )
+    assert.ok(senza.every((x) => x.disabilitato && /non ha il flash/.test(x.titolo)))
+    const muta = pulsantiLampo(telecamera('t2', 'Cantina', null, { raggiungibile: false }))
+    assert.ok(muta.every((x) => x.disabilitato && /non risponde/.test(x.titolo)))
+  })
+
+  it('con la torcia fissa accesa i Lampi dicono che la spegneranno', () => {
+    const p = pulsantiLampo(telecamera('t1', 'Ingresso', null, { dettagli: conFlash, torciaFissa: true }))
+    assert.ok(p.every((x) => !x.acceso))
+    assert.ok(p.every((x) => /poi la spegne/.test(x.titolo)), p.map((x) => x.titolo).join(' | '))
+  })
+
+  it('il pulsante on/off accende se la torcia non e fissa, e spegne se lo e', () => {
+    const spenta = pulsanteTorcia(telecamera('t1', 'Ingresso', null, { dettagli: conFlash }))
+    assert.deepEqual([spenta.acceso, spenta.accendi, spenta.disabilitato], [false, true, false])
+    const fissa = pulsanteTorcia(telecamera('t1', 'Ingresso', null, { dettagli: conFlash, torciaFissa: true }))
+    assert.deepEqual([fissa.acceso, fissa.accendi], [true, false])
+    // Durante un "5 sec" il pulsante accende fissa: la torcia resta accesa
+    // alla fine dei cinque secondi invece di spegnersi.
+    const inLampo = pulsanteTorcia(telecamera('t1', 'Ingresso', null, { dettagli: conFlash, lampoMs: 5000 }))
+    assert.deepEqual([inLampo.acceso, inLampo.accendi], [false, true])
+    assert.match(inLampo.titolo, /resta accesa/)
+  })
+
+  it('il pulsante on/off si spegne come i Lampi, ma spegne sempre una torcia fissa', () => {
+    const senza = pulsanteTorcia(telecamera('t1', 'Ingresso', null, { dettagli: { ...conFlash, haFlash: false } }))
+    assert.ok(senza.disabilitato)
+    // Un telefono che non risponde con la torcia fissa accesa: il pulsante
+    // resta premibile, perche spegnere e l'unica cosa che conta.
+    const muta = pulsanteTorcia(telecamera('t1', 'Ingresso', null, { raggiungibile: false, torciaFissa: true }))
+    assert.equal(muta.disabilitato, false)
+    assert.equal(pulsanteTorcia(telecamera('t2', 'Cantina', null, { raggiungibile: false })).disabilitato, true)
+  })
+
+  it('finche il telefono non ha detto se ha il flash, si lascia provare', () => {
+    // `dettagli` nullo: `/info.json` non ha ancora risposto. Se il flash non
+    // c'e lo dira il motore, con un errore che si legge.
+    const p = pulsantiLampo(telecamera('t1', 'Ingresso', null, { dettagli: null }))
+    assert.ok(p.every((x) => !x.disabilitato))
   })
 })
 
@@ -547,6 +621,6 @@ function telecamera(
     batteria: 80, segnale: 70, inRegistrazione: false, fpsAnteprima: 20,
     vistoIl: null, https: false, utente: null, conPassword: false,
     dettagli: null, geometria: null, orientamento: null, orientamentoCambiatoIl: null,
-    rotazione: 0, inIdentificazione: false, ...extra,
+    rotazione: 0, inIdentificazione: false, lampoMs: null, torciaFissa: false, ...extra,
   }
 }

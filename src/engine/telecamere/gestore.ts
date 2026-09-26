@@ -65,6 +65,45 @@ export interface TelecameraVivaInterna extends Vista {
   readonly geometria: string | null
   readonly orientamento: Orientamento | null
   readonly orientamentoCambiatoIl: string | null
+  readonly lampoMs: number | null
+  readonly torciaFissa: boolean
+}
+
+/**
+ * Una torcia che Regia ha acceso -- per un Lampo o per Identifica -- e non ha
+ * ancora spento.
+ *
+ * Ce n'e al piu una per **telefono**, e chi la spegne e **l'ultimo** che l'ha
+ * chiesta: `turno` dice chi e. Un Lampo che arriva mentre la torcia e gia
+ * accesa non la spegne e riaccende, prende il turno e sposta lo spegnimento.
+ */
+interface Lampo {
+  /**
+   * Come raggiungere il telefono, preso quando si e accesa. Lo spegnimento
+   * deve arrivare anche se nel frattempo la Telecamera e stata rimossa dal
+   * progetto, o se un progetto importato ha dato il suo id a un altro
+   * telefono: quello con la luce addosso resta nella stanza lo stesso.
+   */
+  accesso: AccessoTelecamera
+  nome: string
+  turno: number
+  /**
+   * Quanto resta accesa dalla conferma dell'`on`, o `null` per la torcia
+   * **fissa** del pulsante on/off: accesa finche qualcuno non la spegne, e
+   * quindi senza timer.
+   */
+  durataMs: number | null
+  spegnimento: NodeJS.Timeout | null
+}
+
+/**
+ * Di quale telefono e una torcia. Non l'id della Telecamera: gli id si
+ * ripetono fra un progetto e l'altro (`t1` e il primo di ogni progetto), e
+ * dopo un'importazione lo stesso id puo indicare un altro telefono. La torcia
+ * sta sul telefono, e il telefono si riconosce dall'indirizzo.
+ */
+function telefonoDi(x: { readonly host: string; readonly porta: number }): string {
+  return `${x.host}:${x.porta}`
 }
 
 export interface OpzioniGestore {
@@ -126,6 +165,17 @@ const VALIDITA_IDR_MS = 3000
  * il riquadro diventa nero.
  */
 const FPS_STALLO_MS = 2500
+/** Quanto resta accesa la torcia per Identifica. */
+const DURATA_IDENTIFICA_MS = 2000
+/**
+ * Quante volte si prova a spegnere una torcia prima di arrendersi, e quanto si
+ * aspetta fra un tentativo e l'altro. Un telefono puo non rispondere per un
+ * istante -- il Wi-Fi che si riassocia, la camera che si ri-lega -- e una
+ * torcia rimasta accesa per un solo `off` perso e una stanza illuminata per
+ * tutta la serata.
+ */
+const TENTATIVI_SPEGNIMENTO = 3
+const PAUSA_SPEGNIMENTO_MS = 1000
 
 /**
  * L'fps da mostrare in anteprima: quello misurato, o 0 se lo stream ha smesso
@@ -190,7 +240,22 @@ export class GestoreTelecamere {
   private readonly ascoltatoriByte = new Map<string, Set<AscoltatoreByte>>()
   private anteprime = new Set<string>()
   private battito: NodeJS.Timeout | null = null
-  private identificazione: string | null = null
+  /** L'Identifica in corso: quale Telecamera, e il turno della torcia che ha acceso. */
+  private identificazione: { telecameraId: string; telefono: string; turno: number } | null = null
+  /** Le torce accese da Regia, per telefono (`telefonoDi`). */
+  private readonly lampi = new Map<string, Lampo>()
+  private turniTorcia = 0
+  /**
+   * I comandi della torcia, in fila per telefono. Senza, un `on` e un `off`
+   * partiti a pochi millisecondi l'uno dall'altro viaggiano su due socket
+   * diverse e possono arrivare al telefono nell'ordine sbagliato: la torcia
+   * resterebbe accesa con Regia convinta di averla spenta.
+   */
+  private readonly codeTorcia = new Map<string, Promise<unknown>>()
+  /** Quando e finito l'ultimo comando della torcia, per telefono (`performance.now()`). Vedi `rispegni`. */
+  private readonly ultimoComandoTorcia = new Map<string, number>()
+  /** I telefoni a cui `rispegni` ha gia mandato un `off` che non e ancora tornato. */
+  private readonly rispegnimenti = new Set<string>()
   private chiuso = false
 
   constructor(private readonly opzioni: OpzioniGestore) {}
@@ -207,6 +272,17 @@ export class GestoreTelecamere {
     if (this.battito) clearInterval(this.battito)
     this.battito = null
     for (const id of [...this.sessioni.keys()]) this.chiudiSessione(id)
+    // Chi chiude Regia a torcia accesa non deve lasciare la luce nella stanza.
+    // Lo spegnimento va in fila dietro a un eventuale `on` ancora in volo, e
+    // il turno nuovo toglie a chi l'aveva acceso la voglia di riprogrammarlo.
+    const spegnimenti = [...this.lampi].map(([telefono, l]) => {
+      if (l.spegnimento) clearTimeout(l.spegnimento)
+      l.spegnimento = null
+      l.turno = ++this.turniTorcia
+      return this.inFila(telefono, () => comanda(l.accesso, { torch: 'off' }, 1500)).catch(() => {})
+    })
+    this.lampi.clear()
+    await Promise.all(spegnimenti)
   }
 
   // -------------------------------------------------------------- lettura
@@ -215,12 +291,16 @@ export class GestoreTelecamere {
     const v = this.viste.get(id)
     if (!v) return undefined
     const g = this.geometrie.get(id)
+    const t = this.opzioni.progetto().telecamere.find((x) => x.id === id)
+    const lampo = t ? this.lampi.get(telefonoDi(t)) : undefined
     return {
       ...v,
-      inIdentificazione: this.identificazione === id,
+      inIdentificazione: this.identificazione?.telecameraId === id && this.identificaHaLaTorcia(),
       geometria: g?.geometria ?? null,
       orientamento: g?.orientamento ?? null,
       orientamentoCambiatoIl: g?.cambiatoIl ?? null,
+      lampoMs: lampo?.durataMs ?? null,
+      torciaFissa: lampo !== undefined && lampo.durataMs === null,
     }
   }
 
@@ -310,9 +390,11 @@ export class GestoreTelecamere {
    * Identifica: due secondi di torcia accesa.
    *
    * E il modo di capire quale telefono e quale senza guardare sei anteprime e
-   * senza entrare nella stanza. La torcia si spegne in un `finally`: se
-   * qualcosa va storto a meta, un telefono con la torcia accesa per tutta la
-   * serata si scaricherebbe e illuminerebbe una stanza che deve essere buia.
+   * senza entrare nella stanza. E un Lampo con un nome suo: la torcia la
+   * spegne il timer del Lampo, non questa funzione, cosi un Lampo premuto
+   * sulla griglia nel mezzo di una Identifica non viene tagliato a meta. Da
+   * quel momento l'Identifica e finita, anche se questa funzione aspetta
+   * ancora: la torcia e del Lampo (`identificaHaLaTorcia`).
    */
   async identifica(telecameraId: string): Promise<void> {
     const t = this.telecamera(telecameraId)
@@ -320,25 +402,71 @@ export class GestoreTelecamere {
     if (dettagli && !dettagli.haFlash) {
       throw new Error(`"${t.nome}" non ha il flash: usa l'anteprima per riconoscerla`)
     }
-    if (this.identificazione) throw new Error('c\'e gia una Identifica in corso')
+    if (this.identificaHaLaTorcia()) throw new Error('c\'e gia una Identifica in corso')
 
-    this.identificazione = telecameraId
-    const a = this.accesso(t)
+    const { lampo, turno } = this.prendiTorcia(t, DURATA_IDENTIFICA_MS)
+    const questa = { telecameraId, telefono: telefonoDi(t), turno }
+    this.identificazione = questa
     try {
-      await comanda(a, { torch: 'on' })
+      await this.accendi(lampo, turno)
       this.opzioni.suDiario('info', `Identifica su "${t.nome}": torcia accesa.`)
-      await attendi(2000)
+      await attendi(DURATA_IDENTIFICA_MS)
     } finally {
-      this.identificazione = null
-      try {
-        await comanda(a, { torch: 'off' })
-      } catch (e) {
-        this.opzioni.suDiario(
-          'attenzione',
-          `Non sono riuscito a spegnere la torcia di "${t.nome}": ${(e as Error).message}`,
-        )
-      }
+      if (this.identificazione === questa) this.identificazione = null
     }
+  }
+
+  /**
+   * Un Lampo: la torcia accesa per `durataMs`, e poi spenta da Regia.
+   *
+   * Torna appena il telefono ha confermato l'accensione, non quando la torcia
+   * si spegne: chi preme deve sapere subito se il telefono ha risposto, e un
+   * comando appeso per cinque secondi non gli direbbe niente di piu. La durata
+   * si conta **da quella conferma**, cosi la luce resta accesa quanto chiesto
+   * anche su un telefono che risponde lento.
+   *
+   * Un Lampo nuovo sulla stessa Telecamera **sostituisce** quello in corso: la
+   * torcia non si spegne e riaccende, resta accesa e si spegne `durataMs` dopo
+   * l'ultimo. Vale in tutti e due i versi -- un "flash" premuto durante un
+   * "5 sec" lo accorcia -- ed e voluto: l'ultimo clic dell'Operatore e quello
+   * che sta guardando, ed e anche l'unico modo di spegnere prima del tempo.
+   */
+  async lampo(telecameraId: string, durataMs: number): Promise<void> {
+    const t = this.telecamera(telecameraId)
+    const dettagli = this.viste.get(telecameraId)?.dettagli
+    if (dettagli && !dettagli.haFlash) throw new Error(`"${t.nome}" non ha il flash`)
+    const { lampo, turno } = this.prendiTorcia(t, durataMs)
+    await this.accendi(lampo, turno)
+  }
+
+  /**
+   * Il pulsante on/off: la torcia accesa **finche non la si spegne**, o spenta
+   * adesso.
+   *
+   * Accesa e un Lampo senza scadenza, e segue le stesse regole: prende la
+   * torcia a chi l'aveva, e un Lampo premuto dopo la riprende -- un "flash" su
+   * una torcia fissa la spegne dopo il lampo, perche l'ultimo clic decide. Ed
+   * e di Regia, quindi `rispegni` non la tocca; se Regia si chiude la spegne
+   * `chiudi()`, e se muore la spegne `rispegni` alla riapertura: la torcia
+   * fissa non sopravvive a Regia, apposta.
+   *
+   * Spenta toglie la torcia a chiunque l'abbia -- Lampo, Identifica o fissa --
+   * e aspetta la conferma del telefono. Se il telefono non risponde lo dice il
+   * Diario, come per ogni spegnimento, e il giro di `/info.json` riprova.
+   */
+  async torcia(telecameraId: string, accesa: boolean): Promise<void> {
+    const t = this.telecamera(telecameraId)
+    if (accesa) {
+      const dettagli = this.viste.get(telecameraId)?.dettagli
+      if (dettagli && !dettagli.haFlash) throw new Error(`"${t.nome}" non ha il flash`)
+      const { lampo, turno } = this.prendiTorcia(t, null)
+      await this.accendi(lampo, turno)
+      return
+    }
+    // Anche senza una torcia di Regia si manda l'`off`: chi preme "spegni"
+    // vede una luce, e da dove venga non conta.
+    const { turno } = this.prendiTorcia(t, null)
+    await this.spegniTorcia(telefonoDi(t), turno)
   }
 
   async controlla(
@@ -442,9 +570,11 @@ export class GestoreTelecamere {
    *
    * Oggi il preset e di due voci, e sono le due che Regia cambia davvero:
    * lo streaming acceso, e la **torcia spenta**. La torcia conta piu di quanto
-   * sembri: Identifica la accende, e se Regia muore nei due secondi in cui e
-   * accesa, quel telefono resta con la luce addosso per sempre -- in una stanza
-   * al buio, dentro una casa degli orrori. Riaprire il progetto la spegne.
+   * sembri: Lampi e Identifica la accendono, e sul telefono e persistente --
+   * una luce dimenticata resta addosso a una stanza che deve essere buia. Qui
+   * si spegne quando la Telecamera entra nel progetto; dopo, e `rispegni` a
+   * spegnere a ogni giro di `/info.json` quella che nessun Lampo tiene accesa,
+   * anche dopo una Regia morta a torcia accesa.
    *
    * Zoom e rotazione non stanno nel preset perche non stanno nel dominio:
    * `zTelecamera` non li ha, e Regia non li tocca mai. La risoluzione era
@@ -475,7 +605,7 @@ export class GestoreTelecamere {
       )
     }
     try {
-      await comanda(a, { torch: 'off' })
+      await this.inFila(telefonoDi(t), () => comanda(a, { torch: 'off' }))
     } catch (e) {
       // La torcia no. Un telefono senza flash risponde male a questo comando, e
       // far fallire l'aggiunta di una Telecamera perfettamente funzionante per
@@ -533,6 +663,139 @@ export class GestoreTelecamere {
 
   // ------------------------------------------------------------- interni
 
+  /**
+   * Prende la torcia del telefono di `t` per un turno nuovo. Sincrona apposta:
+   * chi la chiama sa il proprio turno prima di aspettare il telefono.
+   */
+  private prendiTorcia(t: Telecamera, durataMs: number | null): { lampo: Lampo; turno: number } {
+    const telefono = telefonoDi(t)
+    const turno = ++this.turniTorcia
+    let l = this.lampi.get(telefono)
+    if (l) {
+      if (l.spegnimento) clearTimeout(l.spegnimento)
+      l.spegnimento = null
+      l.turno = turno
+      l.durataMs = durataMs
+      l.accesso = this.accesso(t)
+      l.nome = t.nome
+    } else {
+      l = { accesso: this.accesso(t), nome: t.nome, turno, durataMs, spegnimento: null }
+      this.lampi.set(telefono, l)
+    }
+    return { lampo: l, turno }
+  }
+
+  /** Accende la torcia per il turno preso, e programma lo spegnimento. Vedi `lampo`. */
+  private async accendi(lampo: Lampo, turno: number): Promise<void> {
+    const telefono = telefonoDi(lampo.accesso)
+    try {
+      // Anche se la torcia e gia accesa: costa una richiesta, e un telefono
+      // che ha perso l'`on` di prima -- o che si e riavviato -- si riaccende.
+      await this.inFila(telefono, () => comanda(lampo.accesso, { torch: 'on' }))
+    } catch (e) {
+      // Non si sa se la torcia si e accesa: la risposta puo essersi persa dopo
+      // che il telefono ha eseguito il comando, o l'`on` puo essere ancora in
+      // viaggio -- ritrasmesso dal kernel dopo un buco del Wi-Fi -- e arrivare
+      // **dopo** l'`off` che parte adesso su un'altra socket. Il primo caso lo
+      // copre questo `off`; il secondo lo copre `rispegni`, al giro di
+      // `/info.json` dopo.
+      if (lampo.turno === turno) void this.spegniTorcia(telefono, turno)
+      throw e
+    }
+    // Un Lampo piu recente ha preso la torcia mentre si aspettava il telefono:
+    // lo spegnimento e suo. O Regia si sta chiudendo, e allora l'ha gia messo
+    // in fila `chiudi()`.
+    if (lampo.turno !== turno || this.chiuso || lampo.durataMs === null) return
+    lampo.spegnimento = setTimeout(() => void this.spegniTorcia(telefono, turno), lampo.durataMs)
+  }
+
+  /** Vero se l'Identifica in corso ha ancora la torcia, cioe nessun Lampo gliel'ha presa. */
+  private identificaHaLaTorcia(): boolean {
+    const i = this.identificazione
+    return i !== null && this.lampi.get(i.telefono)?.turno === i.turno
+  }
+
+  /**
+   * Spegne la torcia accesa dal Lampo di questo turno, se nessuno gliel'ha
+   * presa nel frattempo. Riprova: un `off` perso lascerebbe la luce accesa
+   * per tutta la serata, ed e il solo comando di Regia che, dimenticato, fa
+   * danno da solo.
+   */
+  private async spegniTorcia(telefono: string, turno: number): Promise<void> {
+    const l = this.lampi.get(telefono)
+    if (!l || l.turno !== turno) return
+    l.spegnimento = null
+    for (let tentativo = 1; ; tentativo++) {
+      try {
+        await this.inFila(telefono, () => comanda(l.accesso, { torch: 'off' }))
+        break
+      } catch (e) {
+        if (l.turno !== turno) return
+        if (tentativo >= TENTATIVI_SPEGNIMENTO) {
+          this.opzioni.suDiario(
+            'attenzione',
+            `Non sono riuscito a spegnere la torcia di "${l.nome}" (${(e as Error).message}): ` +
+              'potrebbe essere rimasta accesa.',
+          )
+          break
+        }
+        await attendi(PAUSA_SPEGNIMENTO_MS)
+        if (l.turno !== turno) return
+      }
+    }
+    // Se durante lo spegnimento e arrivato un Lampo nuovo, la torcia e sua: il
+    // suo `on` e in fila dietro a questo `off`, e lo spegnimento lo programma lui.
+    if (this.lampi.get(telefono) === l && l.turno === turno) this.lampi.delete(telefono)
+  }
+
+  /**
+   * Spegne una torcia che il telefono dice accesa e che nessun Lampo sta
+   * tenendo accesa.
+   *
+   * Regia e la sola ad accenderla -- Lampi e Identifica, nient'altro
+   * nell'interfaccia manda `torch=on` -- quindi una torcia cosi e una torcia
+   * dimenticata, e sul telefono **e persistente**: si riaccende da sola a ogni
+   * avvio della camera (fatti verificati). Succede se un `on` scaduto arriva al
+   * telefono dopo il suo `off`, se lo spegnimento si e arreso, o se Regia e
+   * morta a torcia accesa: in quel caso e il primo giro di `/info.json` dopo la
+   * riapertura a spegnerla.
+   *
+   * `chiestoIl` e quando si e chiesto `/info.json`. Se nel frattempo e finito
+   * un comando della torcia, la lettura puo essere di prima di quel comando:
+   * non si decide niente, e ci pensa il giro dopo.
+   */
+  private rispegni(t: Telecamera, chiestoIl: number): void {
+    const telefono = telefonoDi(t)
+    if (this.chiuso || this.lampi.has(telefono) || this.rispegnimenti.has(telefono)) return
+    if ((this.ultimoComandoTorcia.get(telefono) ?? 0) >= chiestoIl) return
+    this.rispegnimenti.add(telefono)
+    const a = this.accesso(t)
+    this.inFila(telefono, () => comanda(a, { torch: 'off' }))
+      .then(() =>
+        this.opzioni.suDiario(
+          'attenzione',
+          `La torcia di "${t.nome}" era accesa senza un Lampo di Regia: l'ho spenta.`,
+        ),
+      )
+      // Se non risponde si riprova al giro dopo: la lettura dira ancora accesa.
+      .catch(() => {})
+      .finally(() => this.rispegnimenti.delete(telefono))
+  }
+
+  /** Mette `lavoro` in fila dietro ai comandi della torcia gia partiti per questo telefono. */
+  private inFila<T>(telefono: string, lavoro: () => Promise<T>): Promise<T> {
+    const prima = this.codeTorcia.get(telefono) ?? Promise.resolve()
+    const questo = prima.then(lavoro)
+    const coda = questo.catch(() => {}).then(() => {
+      this.ultimoComandoTorcia.set(telefono, performance.now())
+    })
+    this.codeTorcia.set(telefono, coda)
+    void coda.then(() => {
+      if (this.codeTorcia.get(telefono) === coda) this.codeTorcia.delete(telefono)
+    })
+    return questo
+  }
+
   private telecamera(id: string): Telecamera {
     const t = this.opzioni.progetto().telecamere.find((x) => x.id === id)
     if (!t) throw new Error(`Telecamera inesistente: ${id}`)
@@ -557,8 +820,12 @@ export class GestoreTelecamere {
 
   private async chiediInfo(t: Telecamera): Promise<void> {
     const prima = this.viste.get(t.id)
+    // Orologio monotono, come `ultimoComandoTorcia`: con quello di parete un
+    // salto indietro (NTP, un dual boot) zittirebbe `rispegni` per tutto il salto.
+    const chiestoIl = performance.now()
     try {
       const info = await leggiInfo(this.accesso(t))
+      if (info.torcia) this.rispegni(t, chiestoIl)
       // Il verso del sensore decide che geometria chiedere al telefono
       // (`risoluzioneRipresa`): si tiene da parte a ogni giro, perche cambia
       // quando si cambia obiettivo.

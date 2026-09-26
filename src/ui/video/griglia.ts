@@ -18,9 +18,12 @@
 import type { Comando, Stato } from '../../engine/api/protocollo'
 import { Elenco, attributo, classe, el, testo, type Voce } from '../nucleo/dom'
 import {
+  LAMPI,
   celleVideo,
   colonneGriglia,
   descriviGeometria,
+  pulsanteTorcia,
+  pulsantiLampo,
   ruotataDaPoco,
   type CellaVideo,
 } from '../nucleo/viste'
@@ -137,6 +140,30 @@ export class GrigliaVideo {
         gradi: (((rotazione + 90) % 360) as 0 | 90 | 180 | 270),
       })
     })
+    // I Lampi: la torcia del telefono come effetto, durante l'Evento. Stanno
+    // sulla riga del REC, a una distanza fissa che lascia posto a "Fermare?":
+    // il REC che si allarga non deve spingerli via, e un pulsante che scivola
+    // sotto il dito e un clic sulla cosa sbagliata. Nelle celle strette vanno
+    // a capo (stile.css). Un clic solo, senza conferma: la torcia si spegne da
+    // sola.
+    const lampi = LAMPI.map((l) => {
+      const b = el('button', { class: 'lampo', type: 'button', testo: l.etichetta })
+      b.addEventListener('click', () =>
+        this.comanda({ tipo: 'telecamera.lampo', telecameraId: id, durataMs: l.durataMs }),
+      )
+      return b
+    })
+    // La torcia fissa, on/off: accesa finche non la si spegne. Sta in fondo
+    // alla fila, dopo i Lampi a tempo, e acceso si vede come loro.
+    const fissa = el('button', { class: 'lampo fissa', type: 'button', testo: 'on/off' })
+    let accendiFissa = true
+    fissa.addEventListener('click', () =>
+      this.comanda({ tipo: 'telecamera.torcia', telecameraId: id, accesa: accendiFissa }),
+    )
+    const fila = el('div', { class: 'lampi' }, ...lampi, fissa)
+    // Sul contenitore e non sui pulsanti: anche il clic su un pulsante
+    // disabilitato, o nello spazio fra due, non deve ingrandire la cella.
+    fila.addEventListener('click', (e) => e.stopPropagation())
     const nomeZona = el('span', { class: 'zona-nome' })
     const nomeCamera = el('span', { class: 'nome' })
     const spia = el('span', { class: 'spia' })
@@ -151,6 +178,7 @@ export class GrigliaVideo {
       { class: 'cella' },
       tela,
       rec,
+      fila,
       gira,
       ruotata,
       assente,
@@ -198,6 +226,19 @@ export class GrigliaVideo {
         ruotata.hidden = !daPoco
         if (daPoco) testo(ruotata, `video ruotato · ${t.geometria ?? ''}`)
         classe(cella, 'ruotata', daPoco)
+
+        pulsantiLampo(t).forEach((p, i) => {
+          const b = lampi[i]!
+          b.disabled = p.disabilitato
+          classe(b, 'acceso', p.acceso)
+          attributo(b, 'title', p.titolo)
+        })
+        const pt = pulsanteTorcia(t)
+        accendiFissa = pt.accendi
+        fissa.disabled = pt.disabilitato
+        classe(fissa, 'acceso', pt.acceso)
+        attributo(fissa, 'title', pt.titolo)
+        attributo(fissa, 'aria-pressed', pt.acceso ? 'true' : 'false')
 
         rotazione = t.rotazione
         if (decodificatore) decodificatore.rotazione = rotazione

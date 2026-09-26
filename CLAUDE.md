@@ -31,7 +31,7 @@ fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
 ## Comandi
 
 ```bash
-npm test                      # 281 test; 5 si saltano senza ffprobe nel PATH (registrazione). Il
+npm test                      # 310 test; 5 si saltano senza ffprobe nel PATH (registrazione). Il
                               # resto usa l'ffmpeg di vendor/. Concorrenza 1: ogni motore avvia un
                               # thread audio. Su Linux NON deve esserci uno snapserver vivo su 1705,
                               # nemmeno orfano: la suite non esce (fatti verificati, 18 settembre)

@@ -272,6 +272,8 @@ export class MotoreRegia implements Motore {
           orientamentoCambiatoIl: v?.orientamentoCambiatoIl ?? null,
           rotazione: t.rotazione,
           inIdentificazione: v?.inIdentificazione ?? false,
+          lampoMs: v?.lampoMs ?? null,
+          torciaFissa: v?.torciaFissa ?? false,
         }
       }),
       suoni: [...this.progetto.suoni]
@@ -650,6 +652,12 @@ export class MotoreRegia implements Motore {
       }
       case 'telecamera.identifica':
         await this.telecamere.identifica(c.telecameraId)
+        break
+      case 'telecamera.lampo':
+        await this.telecamere.lampo(c.telecameraId, c.durataMs)
+        break
+      case 'telecamera.torcia':
+        await this.telecamere.torcia(c.telecameraId, c.accesa)
         break
       case 'telecamera.rotazione': {
         // ADR 0014: non si manda niente al telefono. Gira Regia, e la

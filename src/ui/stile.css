@@ -741,6 +741,8 @@ main.schermo > section.produzione.attiva {
   overflow: hidden;
   position: relative;
   cursor: zoom-in;
+  /* Per i Lampi: in una cella stretta vanno a capo (vedi `.cella .lampi`). */
+  container-type: inline-size;
 }
 
 .cella canvas {
@@ -815,6 +817,57 @@ main.schermo > section.produzione.attiva {
   letter-spacing: 0;
 }
 
+/* I Lampi (flash, 1 sec, 5 sec). Sulla riga del REC, a una distanza fissa
+   che lascia posto a "Fermare?" (62 px misurati): il REC che si allarga non
+   deve spingerli via, un pulsante che scivola sotto il dito e un clic sulla
+   cosa sbagliata. Stanno sopra `.assente`, che copre la cella quando non
+   arrivano fotogrammi: il telefono puo rispondere e la torcia funzionare anche
+   con il video fermo, ed e proprio allora che un clic non deve ingrandire la
+   cella. Acceso e bianco caldo, il colore della torcia, e non l'ambra degli
+   avvisi: una torcia accesa e un effetto voluto, non un problema. */
+.cella .lampi {
+  position: absolute;
+  top: 6px;
+  left: 74px;
+  z-index: 1;
+  display: flex;
+  gap: 4px;
+}
+
+/* Il pulsante on/off della torcia fissa: in fondo alla fila, staccato dai
+   Lampi a tempo perche non si spegne da solo. */
+.cella .lampo.fissa {
+  margin-left: 4px;
+}
+
+.cella .lampo {
+  background: rgba(20, 20, 26, 0.72);
+  border: 1px solid #4a4a58;
+  border-radius: 3px;
+  color: #b9b9c6;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.cella .lampo:hover:not(:disabled) {
+  border-color: #fff1c4;
+  color: #fff;
+}
+
+.cella .lampo.acceso {
+  background: #fff1c4;
+  border-color: #fff1c4;
+  color: #1a1a20;
+  box-shadow: 0 0 10px rgb(255 241 196 / 70%);
+}
+
+.cella .lampo:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 /* Il giro dell'inquadratura, dichiarato dall'Operatore (ADR 0014). Discreto:
    si usa in Setup, e durante l'Evento non deve chiamare la mano. Sta a destra,
    lontano dal REC, che e in alto a sinistra. */
@@ -861,6 +914,22 @@ main.schermo > section.produzione.attiva {
 
 .cella.ruotata {
   border-color: var(--attenzione);
+}
+
+/* Sotto i 300 px la riga non ci sta (REC, Lampi, on/off e giro sono ~290
+   px): i Lampi scendono sotto il REC invece di finire sopra il giro, e
+   l'avviso di rotazione scende di una riga per non finire sotto di loro.
+   In una cella bassa meno di ~55 px la seconda riga non entra: e il limite
+   di una griglia a 4 colonne schiacciata al minimo. */
+@container (max-width: 300px) {
+  .cella .lampi {
+    top: 30px;
+    left: 6px;
+  }
+
+  .cella .rotazione {
+    top: 54px;
+  }
 }
 
 @keyframes lampeggia {

@@ -69,6 +69,18 @@ un suono breve se è un Altoparlante, un lampo di torcia se è una Telecamera. �
 principale con cui si abbinano i Telefoni alle Zone durante il setup.
 _Evita_: ping, test, localizza, blink
 
+**Lampo**:
+La torcia di una Telecamera accesa per un tempo fisso e poi spenta da Regia: un effetto per chi
+sta nella stanza, non per chi guarda. Sulla griglia ce ne sono tre per cella — "flash", "1 sec",
+"5 sec" — e l'ultimo premuto decide quando la luce si spegne, anche se accorcia quello in corso.
+Anche Identifica, su una Telecamera, è un Lampo: di due secondi, e con uno scopo diverso.
+Accanto ai Lampi c'è la **torcia fissa** (il pulsante "on/off"): un Lampo senza scadenza, accesa
+finché qualcuno non la spegne; un Lampo premuto dopo la riprende e, finito il suo tempo, la spegne.
+Regia è la sola ad accendere la torcia: una torcia che il telefono dice accesa senza un Lampo in
+corso è una torcia dimenticata, e Regia la spegne. La torcia fissa non sopravvive a Regia.
+_Evita_: flash (è l'etichetta del più corto, non il nome dell'azione), strobo, torcia (è
+l'oggetto, non l'azione)
+
 **Rotazione**:
 Di quanto Regia gira l'immagine di una Telecamera perché si veda dritta: nessuno, un quarto, metà
 o tre quarti di giro in senso orario. **La dichiara l'Operatore** quando monta il telefono, non si

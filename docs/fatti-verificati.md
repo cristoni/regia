@@ -1197,3 +1197,67 @@ chiave che Regia riceve e misurando le colonne e le righe non nere.
   `Display Matrix: rotation of -90.00 degrees`, cioè **1280×960 orizzontale** per chi lo apre,
   video `-c:v copy` non ricodificato e audio AAC accanto. Estratto un fotogramma: inquadratura
   dritta, piena, senza bande.
+
+## La torcia e i Lampi, letto nel sorgente e misurato il 26 settembre 2026
+
+I Lampi della griglia ("flash", "1 sec", "5 sec") accendono la torcia con `/?torch=on` e la
+spengono con `/?torch=off` dopo la durata. Il sorgente è android-ip-camera `main` a `4a72373`
+(v0.14.0); il codice della torcia è lo stesso in v0.12.0 e v0.13.1. Le misure sono sul telefono a
+`192.168.1.11`, obiettivo posteriore `4:0`, `960x1280`, in doze (ping 90–1100 ms).
+
+- **[sorgente]** **Il `200` torna prima che il LED cambi.** `StreamingService.handleRemoteControl`
+  (`@Synchronized`) scrive la preferenza `camera_torch` e posta il lavoro sul thread principale
+  (`launchMain`); solo dopo la risposta parte. `enableTorch` di CameraX è a sua volta asincrono.
+  → La durata di un Lampo si conta dalla conferma, e dei 300 ms del "flash" se ne vede un po'
+  meno di quanto dica il numero, più il viaggio dell'`off`.
+- **[sorgente]** **Nessun debounce sulla torcia**: `debouncedStartCamera` (300 ms) vale solo per
+  `camera`, `resolution`, `api` e i client che si collegano. Valori accettati `on`, `off`,
+  `toggle`; qualunque altro (`true`, `1`) viene ignorato **e risponde `200` lo stesso**.
+- **[sorgente]** **Ogni richiesta ha la sua coroutine**, quindi due richieste in volo possono
+  arrivare al servizio nell'ordine sbagliato. Siccome il `200` parte dopo che il comando è stato
+  accodato, **aspettare la risposta dell'`on` prima di mandare l'`off` basta a garantirne
+  l'ordine** → i comandi della torcia, in `gestore.ts`, vanno in fila per **telefono**
+  (`inFila`, chiave `host:porta`, non l'id della Telecamera: gli id si ripetono fra un progetto e
+  l'altro). Un `off` che scavalcasse l'`on` lascerebbe la torcia accesa.
+- **[sorgente]** ⚠️ **La fila non basta quando l'`on` scade.** Se la risposta non arriva in 3 s,
+  l'`on` può essere ancora in viaggio — la richiesta persa in un buco del Wi-Fi e ritrasmessa
+  dal kernel sulla socket orfana, mentre il telefono aspetta fino a 60 s (`SOCKET_TIMEOUT_MS`)
+  — e l'`off` che Regia manda subito su una socket nuova può arrivare prima. Regia non manda il
+  parametro `ts`, quindi il telefono non scarta il comando vecchio. Riprodotto con un telefono
+  finto che esegue l'`on` 4 s dopo averlo ricevuto: torcia accesa, Regia convinta del
+  contrario. → `rispegni`: a ogni giro di `/info.json`, una torcia che il telefono dice accesa e
+  che nessun Lampo sta tenendo accesa si spegne, con una riga di Diario. Vale anche per una Regia
+  morta a torcia accesa, e per uno spegnimento che si è arreso. Non si decide su una lettura
+  chiesta prima che finisse l'ultimo comando della torcia.
+- **[sorgente]** ⚠️ **La torcia è persistente** (`camera_torch` nelle preferenze) e si riaccende a
+  ogni avvio della camera (`applyStored`, `scheduleVerifyTorchRestored`). Se Regia muore a torcia
+  accesa, il telefono la tiene accesa, anche dopo un riavvio dell'app. `chiudi()` la spegne, ma
+  una Regia uccisa non passa da lì, e `preparaTelecamera` gira solo quando si **aggiunge** una
+  Telecamera. Alla riapertura la spegne `rispegni`, al primo giro di `/info.json`.
+- **[sorgente]** **Con nessun flusso aperto, `torch=on` apre la camera** (`cameraHeldForTorch`) e
+  `torch=off` la richiude; un `off` che arriva mentre la camera si sta ancora legando può far sì
+  che il LED non si accenda affatto. Dalla griglia di solito c'è un flusso aperto, ma non sempre:
+  subito dopo aver rimpicciolito una cella ingrandita, i flussi delle altre si stanno riaprendo
+  e le loro celle mostrano ancora l'ultimo fotogramma. Se chiudere `/video/h264` faccia davvero
+  chiudere la camera al telefono **non è stato verificato**; un "flash" premuto in quel mezzo
+  secondo potrebbe non vedersi.
+- **[sorgente]** **Un telefono senza flash risponde `200 OK`** a `torch=on`, scrive comunque la
+  preferenza e mostra `torch: "on"` in `/info.json` con `deviceHasFlash: false`. Per questo il
+  motore rifiuta il Lampo quando `deviceHasFlash` è falso, invece di fidarsi dell'esito.
+- **[misurato]** **Cambiare la torcia non interrompe `/video/h264`.** Con l'anteprima aperta, tre
+  Lampi (1 s, 5 s, 300 ms) a sette secondi l'uno dall'altro: 1011 fotogrammi, **nessun buco oltre
+  400 ms**, geometria invariata. Il sorgente lo dice (i codificatori non si toccano), e la misura
+  lo conferma.
+- **[misurato]** **La luce che si vede nell'anteprima**, dalla luminosità media (`YAVG`) dei
+  fotogrammi arrivati a Regia: "1 sec" circa **1,3 s**, "5 sec" circa **5,2 s**, "flash" circa
+  **0,6 s**. Lo scarto costante di ~0,3 s è il viaggio dell'`off` verso un telefono in doze; la
+  conferma dell'`on` è arrivata in 82–191 ms. All'accensione l'esposizione automatica fa un picco
+  (YAVG da 85 a ~130) e si assesta in mezzo secondo; allo spegnimento l'immagine scende sotto il
+  livello di prima per ~0,4 s e risale. Che il LED faccia davvero luce nella stanza **non** è stato
+  guardato a occhio: lo dice il video.
+- **[misurato]** Una prima prova con il REC acceso mostrava due buchi di ~3,5 s e due ripartenze
+  dell'esposizione dal buio: non erano la torcia, perché nella prova senza REC non ci sono. Il
+  sospetto è il REC stesso: all'accensione Regia rimanda la geometria al telefono (ADR 0012), e
+  `resolution` passa da `debouncedStartCamera`, che ri-lega la camera anche se la geometria è la
+  stessa. **Non verificato.**
+

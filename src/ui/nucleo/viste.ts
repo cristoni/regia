@@ -167,6 +167,104 @@ export function ruotateDiRecente(stato: Stato, adesso = Date.now()): TelecameraV
     .sort((a, b) => b.orientamentoCambiatoIl!.localeCompare(a.orientamentoCambiatoIl!))
 }
 
+// -------------------------------------------------------------- i Lampi
+
+/**
+ * I tre Lampi di ogni cella della griglia, con le etichette che l'Operatore
+ * ha chiesto. "flash" e un colpo solo: abbastanza lungo perche la torcia del
+ * telefono faccia in tempo ad accendersi davvero, abbastanza corto da
+ * sembrare un lampo e non una luce.
+ *
+ * La luce dura **piu** del numero, non meno: la durata si conta dalla
+ * conferma dell'`on`, e dopo c'e ancora il viaggio dell'`off`. Misurato il 26
+ * settembre 2026 su un telefono in doze (fatti verificati): "flash" ~0,6 s,
+ * "1 sec" ~1,3 s, "5 sec" ~5,2 s. Chi accorcia il "flash" sappia che sotto
+ * c'e uno scarto fisso di circa 0,3 s.
+ */
+export const LAMPI = [
+  { etichetta: 'flash', durataMs: 300, descrizione: 'un lampo di torcia' },
+  { etichetta: '1 sec', durataMs: 1000, descrizione: 'la torcia accesa per un secondo' },
+  { etichetta: '5 sec', durataMs: 5000, descrizione: 'la torcia accesa per cinque secondi' },
+] as const
+
+export interface PulsanteLampo {
+  readonly etichetta: string
+  readonly durataMs: number
+  /** La torcia e accesa adesso da **questo** Lampo. */
+  readonly acceso: boolean
+  readonly disabilitato: boolean
+  readonly titolo: string
+}
+
+/**
+ * Come si mostrano i tre Lampi di una Telecamera.
+ *
+ * Si illumina il pulsante del Lampo in corso, non tutti e tre: con la torcia
+ * accesa da un "5 sec" l'Operatore deve vedere che e un "5 sec", e che un
+ * "flash" adesso lo accorcerebbe. Identifica e un Lampo di due secondi, che
+ * nessun pulsante porta: la torcia accesa si legge allora nel titolo.
+ *
+ * Disabilitati solo quando e **certo** che non servano: un telefono che non
+ * risponde, o che ha detto di non avere il flash. Finche `/info.json` non ha
+ * risposto (`dettagli` nullo) si lascia provare: se non ha il flash lo dira il
+ * motore, con un errore che si legge.
+ */
+export function pulsantiLampo(t: TelecameraViva): PulsanteLampo[] {
+  const senzaFlash = t.dettagli?.haFlash === false
+  const disabilitato = !t.raggiungibile || senzaFlash
+  return LAMPI.map((l) => {
+    const acceso = t.lampoMs === l.durataMs
+    let titolo: string
+    if (senzaFlash) titolo = `"${t.nome}" non ha il flash`
+    else if (!t.raggiungibile) titolo = `"${t.nome}" non risponde`
+    else if (t.torciaFissa) {
+      titolo = `Torcia di "${t.nome}" accesa fissa: ${l.descrizione} da adesso, e poi la spegne`
+    } else if (t.lampoMs !== null && !acceso) {
+      titolo = `Torcia di "${t.nome}" gia accesa: ${l.descrizione} da adesso`
+    } else titolo = `Accende ${l.descrizione} su "${t.nome}"`
+    return { etichetta: l.etichetta, durataMs: l.durataMs, acceso, disabilitato, titolo }
+  })
+}
+
+export interface PulsanteTorcia {
+  /** La torcia e accesa fissa: il pulsante e premuto. */
+  readonly acceso: boolean
+  /** Cosa chiede il prossimo clic: accendere fissa, o spegnere. */
+  readonly accendi: boolean
+  readonly disabilitato: boolean
+  readonly titolo: string
+}
+
+/**
+ * Il pulsante on/off della torcia, accanto ai Lampi.
+ *
+ * E premuto solo per la torcia **fissa**. Durante un Lampo non lo e, e un
+ * clic la rende fissa: la luce che c'e gia resta, invece di spegnersi alla
+ * fine del Lampo. Per spegnere prima del tempo un Lampo c'e il "flash".
+ *
+ * Con la torcia fissa accesa **non si disabilita mai**, nemmeno se il
+ * telefono non risponde: spegnere e l'unica cosa che conta, e un telefono
+ * appena tornato raggiungibile deve poterla spegnere al primo clic.
+ */
+export function pulsanteTorcia(t: TelecameraViva): PulsanteTorcia {
+  const senzaFlash = t.dettagli?.haFlash === false
+  if (t.torciaFissa) {
+    return {
+      acceso: true,
+      accendi: false,
+      disabilitato: false,
+      titolo: `Spegne la torcia di "${t.nome}"`,
+    }
+  }
+  let titolo: string
+  if (senzaFlash) titolo = `"${t.nome}" non ha il flash`
+  else if (!t.raggiungibile) titolo = `"${t.nome}" non risponde`
+  else if (t.lampoMs !== null || t.inIdentificazione) {
+    titolo = `La torcia di "${t.nome}" resta accesa finche non la spegni`
+  } else titolo = `Accende la torcia di "${t.nome}" finche non la spegni`
+  return { acceso: false, accendi: true, disabilitato: senzaFlash || !t.raggiungibile, titolo }
+}
+
 /**
  * Il **fotogramma** che arriva da una Telecamera: `1280×720`.
  *
