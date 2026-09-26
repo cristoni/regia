@@ -10,16 +10,26 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import type { AmbienteVivo, Stato, SuonoVivo, ZonaViva } from '../../engine/api/protocollo'
+import type {
+  AmbienteVivo,
+  Stato,
+  SuonoVivo,
+  TelecameraViva,
+  ZonaViva,
+} from '../../engine/api/protocollo'
 import {
+  FINESTRA_ROTAZIONE_MS,
   celleVideo,
   colonneGriglia,
   daQuando,
+  descriviGeometria,
   effettiDellaZona,
   inCorso,
   passoDelFlusso,
   riepilogoSetup,
   righeAmbiente,
+  ruotataDaPoco,
+  ruotateDiRecente,
   salute,
   scorciatoie,
 } from './viste'
@@ -167,6 +177,59 @@ describe('la griglia video', () => {
   it('sceglie le colonne come chiede il §3.6', () => {
     assert.deepEqual([1, 2, 4, 6, 9, 12].map(colonneGriglia), [1, 2, 2, 3, 3, 4])
   })
+
+  it('descrive il fotogramma misurato, non la risoluzione chiesta al telefono', () => {
+    // `dettagli.risoluzione` e la preferenza sul telefono e puo dire "auto".
+    // E non si scrive "verticale"/"orizzontale": quella parola prometterebbe
+    // di sapere come sta l'immagine dentro il fotogramma, e da un SPS non si
+    // vede -- il telefono puo impaginarne una verticale dentro un fotogramma
+    // orizzontale fra due bande nere (ADR 0013, correzione).
+    const t = telecamera('t1', 'Ingresso', null, {
+      geometria: '720x1280', orientamento: 'verticale',
+      dettagli: {
+        torcia: false, haFlash: true, risoluzione: 'auto', fps: 20,
+        obiettivo: '0', obiettiviDisponibili: [], risoluzioniDisponibili: [],
+      },
+    })
+    assert.equal(descriviGeometria(t), '720×1280')
+    assert.equal(descriviGeometria(telecamera('t2', 'Cantina', null)), null)
+  })
+
+  it('una Telecamera e "ruotata da poco" per un minuto, poi no', () => {
+    const adesso = Date.parse('2026-09-19T21:00:00Z')
+    const t = telecamera('t1', 'Ingresso', null, {
+      orientamento: 'orizzontale', orientamentoCambiatoIl: '2026-09-19T20:59:30Z',
+    })
+    assert.equal(ruotataDaPoco(t, adesso), true)
+    assert.equal(ruotataDaPoco(t, adesso + FINESTRA_ROTAZIONE_MS), false)
+    assert.equal(ruotataDaPoco(telecamera('t2', 'Cantina', null), adesso), false)
+    // Una data rotta non deve ne lanciare ne restare accesa per sempre.
+    assert.equal(ruotataDaPoco(telecamera('t3', 'Bagno', null, { orientamentoCambiatoIl: 'ieri' }), adesso), false)
+  })
+
+  it('un client con l orologio indietro non tiene acceso l avviso per lo sfasamento', () => {
+    // L'istante lo scrive il motore, il confronto lo fa il client -- e il
+    // tablet della Fase 3 non e la macchina del motore. Senza il `>= 0` un
+    // client indietro di dieci minuti avrebbe tenuto l'avviso acceso per dieci
+    // minuti e un secondo su una Telecamera ferma.
+    const cambiato = '2026-09-19T21:00:00Z'
+    const t = telecamera('t1', 'Ingresso', null, { orientamento: 'verticale', orientamentoCambiatoIl: cambiato })
+    const indietro = Date.parse(cambiato) - 10 * 60_000
+    assert.equal(ruotataDaPoco(t, indietro), false)
+    assert.equal(ruotataDaPoco(t, Date.parse(cambiato)), true)
+  })
+
+  it('le ruotate di recente vengono con l ultima per prima', () => {
+    const adesso = Date.parse('2026-09-19T21:00:00Z')
+    const s = stato({
+      telecamere: [
+        telecamera('t1', 'Ingresso', null, { orientamento: 'orizzontale', orientamentoCambiatoIl: '2026-09-19T20:59:10Z' }),
+        telecamera('t2', 'Cantina', null, { orientamento: 'verticale', orientamentoCambiatoIl: '2026-09-19T20:59:40Z' }),
+        telecamera('t3', 'Bagno', null, { orientamento: 'verticale', orientamentoCambiatoIl: '2026-09-19T20:50:00Z' }),
+      ],
+    })
+    assert.deepEqual(ruotateDiRecente(s, adesso).map((t) => t.id), ['t2', 't1'])
+  })
 })
 
 describe('la barra di stato', () => {
@@ -237,6 +300,60 @@ describe('la barra di stato', () => {
     })
     assert.equal(salute(s).livello, 'attenzione')
     assert.match(salute(s).testo, /Cucina/)
+  })
+
+  it('segnala per un minuto una Telecamera che ha cambiato verso, poi tace', () => {
+    // Un telefono girato durante l'Evento e quasi sempre un telefono che
+    // qualcuno ha toccato: si dice, ma e un evento, non una condizione.
+    const adesso = Date.parse('2026-09-19T21:00:00Z')
+    const s = stato({
+      zone: [zona('z1', { nome: 'Ingresso' })],
+      telecamere: [
+        telecamera('t1', 'Occhio', 'z1', {
+          geometria: '1280x720', orientamento: 'orizzontale',
+          orientamentoCambiatoIl: '2026-09-19T20:59:30Z',
+        }),
+      ],
+    })
+    const v = salute(s, adesso)
+    assert.equal(v.livello, 'attenzione')
+    assert.match(v.testo, /Occhio/)
+    assert.match(v.testo, /ha ruotato/)
+    assert.match(v.testo, /1280x720/)
+    // Non promette di sapere come sta l'immagine: quella parola era la bugia
+    // vista sul telefono vero (ADR 0013, correzione).
+    assert.doesNotMatch(v.testo, /verticale|orizzontale/)
+    assert.equal(salute(s, adesso + FINESTRA_ROTAZIONE_MS).livello, 'info')
+  })
+
+  it('con piu Telecamere ruotate le conta e nomina l ultima', () => {
+    const adesso = Date.parse('2026-09-19T21:00:00Z')
+    const s = stato({
+      telecamere: [
+        telecamera('t1', 'Ingresso', null, { orientamento: 'orizzontale', orientamentoCambiatoIl: '2026-09-19T20:59:10Z' }),
+        telecamera('t2', 'Cantina', null, { orientamento: 'verticale', orientamentoCambiatoIl: '2026-09-19T20:59:40Z' }),
+      ],
+    })
+    const v = salute(s, adesso)
+    assert.match(v.testo, /2 Telecamere hanno ruotato/)
+    assert.match(v.testo, /Cantina/)
+  })
+
+  it('una Telecamera ruotata non copre un Flusso muto, ma passa avanti al disco quasi pieno', () => {
+    const adesso = Date.parse('2026-09-19T21:00:00Z')
+    const ruotata = telecamera('t1', 'Occhio', null, {
+      orientamento: 'verticale', orientamentoCambiatoIl: '2026-09-19T20:59:50Z',
+    })
+    const muta = stato({ zone: [zona('z1', { scrittore: 'caduto' })], telecamere: [ruotata] })
+    assert.equal(salute(muta, adesso).livello, 'grave')
+    assert.match(salute(muta, adesso).testo, /Flusso non attivo/)
+
+    const disco = stato({
+      telecamere: [ruotata],
+      registrazione: { attive: 0, spazioLiberoGb: 3, sottoAvviso: true, bloccata: false, cartella: 'C:/V' },
+    })
+    assert.match(salute(disco, adesso).testo, /ha ruotato/)
+    assert.match(salute(disco, adesso + FINESTRA_ROTAZIONE_MS).testo, /GB di spazio/)
   })
 })
 
@@ -419,11 +536,17 @@ describe('da quando non si vede', () => {
   })
 })
 
-function telecamera(id: string, nome: string, zonaId: string | null) {
+function telecamera(
+  id: string,
+  nome: string,
+  zonaId: string | null,
+  extra: Partial<TelecameraViva> = {},
+): TelecameraViva {
   return {
     id, nome, zonaId, host: '192.168.1.7', porta: 4444, raggiungibile: true,
     batteria: 80, segnale: 70, inRegistrazione: false, fpsAnteprima: 20,
     vistoIl: null, https: false, utente: null, conPassword: false,
-    dettagli: null, inIdentificazione: false,
+    dettagli: null, geometria: null, orientamento: null, orientamentoCambiatoIl: null,
+    rotazione: 0, inIdentificazione: false, ...extra,
   }
 }

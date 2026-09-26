@@ -74,6 +74,16 @@ export const zComando = z.discriminatedUnion('tipo', [
   z.object({ tipo: z.literal('telecamera.rinomina'), telecameraId: z.string(), nome: z.string().min(1) }),
   z.object({ tipo: z.literal('telecamera.assegna'), telecameraId: z.string(), zonaId: z.string().nullable() }),
   z.object({ tipo: z.literal('telecamera.identifica'), telecameraId: z.string() }),
+  /**
+   * Di quanto Regia gira l'immagine di questa Telecamera, in gradi orari
+   * (ADR 0014). Non tocca il telefono: gira l'anteprima e scrive la rotazione
+   * nel file registrato.
+   */
+  z.object({
+    tipo: z.literal('telecamera.rotazione'),
+    telecameraId: z.string(),
+    gradi: z.union([z.literal(0), z.literal(90), z.literal(180), z.literal(270)]),
+  }),
   z.object({ tipo: z.literal('telecamera.rimuovi'), telecameraId: z.string() }),
   z.object({
     tipo: z.literal('telecamera.controlla'),
@@ -252,6 +262,14 @@ export interface AltoparlanteVivo {
   readonly inIdentificazione: boolean
 }
 
+/**
+ * Da che verso sta il **fotogramma** che una Telecamera manda: piu alto che
+ * largo, o no. Non dice come sta l'immagine dentro il fotogramma -- il
+ * telefono puo impaginarne una verticale dentro un fotogramma orizzontale, fra
+ * due bande nere, e da fuori i due casi sono identici (ADR 0013, correzione).
+ */
+export type Orientamento = 'verticale' | 'orizzontale'
+
 export interface TelecameraViva {
   readonly id: string
   readonly nome: string
@@ -281,6 +299,34 @@ export interface TelecameraViva {
     readonly obiettiviDisponibili: readonly string[]
     readonly risoluzioniDisponibili: readonly string[]
   } | null
+  /**
+   * La geometria del fotogramma che arriva **davvero**, letta dall'SPS
+   * dell'ultimo fotogramma chiave: `1280x720`, `720x1280`. Non e
+   * `dettagli.risoluzione`, che e la preferenza scritta sul telefono (`auto`,
+   * `1280x720`) e non dice cosa esce. `null` finche non si e visto un
+   * fotogramma chiave.
+   */
+  readonly geometria: string | null
+  /**
+   * Il verso del fotogramma, derivato dalla geometria (ADR 0013). **Non** il
+   * verso dell'immagine: su molti telefoni il fotogramma resta orizzontale e
+   * l'immagine verticale ci sta dentro fra due bande nere -- misurato il 19
+   * settembre 2026, vedi la correzione in fondo all'ADR.
+   */
+  readonly orientamento: Orientamento | null
+  /**
+   * Quando il fotogramma ha scambiato gli assi l'ultima volta, o `null` se
+   * mai. E un istante e non un flag perche l'interfaccia lo segnala per un
+   * minuto e poi smette da sola: una rotazione e un evento, non una
+   * condizione.
+   */
+  readonly orientamentoCambiatoIl: string | null
+  /**
+   * Di quanto Regia gira l'immagine di questa Telecamera, in gradi orari
+   * (ADR 0014): 0, 90, 180 o 270. Lo dichiara l'Operatore, e vale per
+   * l'anteprima e per il file registrato.
+   */
+  readonly rotazione: 0 | 90 | 180 | 270
   /** Vero mentre la torcia lampeggia per Identifica. */
   readonly inIdentificazione: boolean
 }

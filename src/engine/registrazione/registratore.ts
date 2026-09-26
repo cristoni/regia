@@ -66,6 +66,11 @@ interface InCorso {
   stacca: () => void
   /** Vero mentre si aspetta che il telefono torni: REC resta acceso (§3.7). */
   inAttesa: boolean
+  /**
+   * Vero finche non e stato aperto il primo file di questa registrazione.
+   * Serve solo al Diario: il primo file non e una "ripresa".
+   */
+  primoFile: boolean
   chiudendo: boolean
   /** La pompa del secondo ingresso, se si registra anche l'audio. */
   pompa: PompaAudio | null
@@ -159,7 +164,10 @@ export class Registratore {
       ffmpeg: null,
       mux: null,
       stacca: () => {},
-      inAttesa: false,
+      // ffmpeg non nasce qui: nasce al primo byte (vedi in fondo a questa
+      // funzione), e fino ad allora la registrazione e "in attesa".
+      inAttesa: true,
+      primoFile: true,
       chiudendo: false,
       pompa: null,
       portaAudio: null,
@@ -216,7 +224,10 @@ export class Registratore {
         // e non ne serve uno -- questo *e* l'avviso.
         if (!inCorso.ffmpeg && inCorso.inAttesa) {
           this.apriFfmpeg(telecameraId, inCorso)
-          this.opzioni.suDiario('info', `Registrazione di "${t.nome}" ripresa su un file nuovo.`)
+          if (!inCorso.primoFile) {
+            this.opzioni.suDiario('info', `Registrazione di "${t.nome}" ripresa su un file nuovo.`)
+          }
+          inCorso.primoFile = false
         }
         const f = inCorso.ffmpeg
         const mux = inCorso.mux
@@ -251,7 +262,15 @@ export class Registratore {
       },
     })
 
-    this.apriFfmpeg(telecameraId, inCorso)
+    // ⚠️ **ffmpeg parte al primo byte, non adesso.** Sembra un dettaglio e non
+    // lo e: fra l'accensione del REC e i byte puo esserci un riavvio del
+    // flusso -- `fissaRisoluzione` qui sopra puo aver appena cambiato la
+    // geometria del telefono, e il telefono per cambiarla ri-lega la camera e
+    // chiude la connessione. Un ffmpeg gia partito riceveva quella chiusura
+    // come fine dell'ingresso («could not find codec parameters», «End of
+    // file»), moriva e **non lasciava nessun file**: misurato il 19 settembre
+    // 2026, due tentativi e zero registrazioni. Aspettando il primo byte,
+    // l'attesa e gratis e il ciclo di ripresa che gia esiste fa il resto.
     this.opzioni.suDiario('info', `REC acceso su "${t.nome}".`)
   }
 
@@ -341,6 +360,15 @@ export class Registratore {
     const argomenti = [
       '-hide_banner',
       '-loglevel', 'warning',
+      // La rotazione dichiarata dall'Operatore (ADR 0014) entra nel file come
+      // **matrice di visualizzazione**, non ricodificando: il video resta
+      // `-c:v copy` (ADR 0009), e i fotogrammi sono gli stessi byte del
+      // telefono. `-display_rotation` e un'opzione dell'**ingresso** e va
+      // quindi prima di `-i`, e gira in senso **antiorario**: `rotazione` e in
+      // gradi orari, percio il segno si inverte (misurato il 19 settembre
+      // 2026 sui fotogrammi del telefono vero). A 0 non si scrive niente,
+      // cosi un file non ruotato resta identico a prima.
+      ...(t.rotazione === 0 ? [] : ['-display_rotation:v:0', String(-t.rotazione)]),
       // Il video arriva gia' come MPEG-TS con i PTS che ha messo Regia (`MuxTs`),
       // NON come H.264 grezzo con `-use_wallclock_as_timestamps`. Quel percorso
       // faceva timbrare a ffmpeg l'ora di lettura: con l'ingresso audio accanto,

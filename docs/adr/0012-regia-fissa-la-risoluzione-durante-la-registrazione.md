@@ -87,3 +87,26 @@ moduli veri: lo switch di geometria ad `auto` su entrambi i telefoni; la tenuta 
 con `?resolution=WxH`; il congelamento dipendente dal lettore su uno switch iniettato (ffmpeg
 decodifica pulito, l'`avcC` unico blocca i lettori rigidi); il contratto del parametro letto in
 `StreamingService.kt`. Le righe stanno in [`docs/fatti-verificati.md`](../fatti-verificati.md).
+
+---
+
+## Correzione del 19 settembre 2026: il valore non è più fisso, e non vale più solo al REC
+
+Questo ADR sceglieva `1280x720` e lo applicava **solo mentre si registra**. Due misure sul
+telefono della casa hanno cambiato tutte e due le cose; la decisione di fondo — una geometria
+concreta, mai un'etichetta, per spegnere l'adattamento — regge intatta.
+
+**Il valore.** Il telefono impagina l'immagine dentro la geometria chiesta invece di ritagliarla:
+con `1280x720` chiesto a un telefono in piedi, l'immagine utile misurata era **405×720**, il resto
+nero. Due terzi del fotogramma pagati in banda e scritti su disco. Ora la geometria segue il verso
+del **sensore** dell'obiettivo attivo (`sensorOrientation` in `/info.json`) — `risoluzioneRipresa()`
+in `gestore.ts`, `960x1280` o `1280x960` — e il fotogramma esce pieno (misurato).
+
+**Il momento.** La si manda anche quando si aggiunge una Telecamera, quando se ne apre il flusso e
+quando se ne dichiara la rotazione, non più solo al REC: senza, l'anteprima resterebbe impaginata
+fra bande nere fino alla prima registrazione. Vedi
+l'[ADR 0014](0014-la-rotazione-la-dichiara-l-operatore-e-la-applica-regia.md).
+
+Resta vero, e più importante di prima, che cambiare geometria **chiude il flusso** per un istante:
+per questo Regia non la tocca mentre quella Telecamera registra, e per questo ffmpeg ora nasce al
+primo byte invece che all'accensione del REC (ADR 0014).

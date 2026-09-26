@@ -19,9 +19,9 @@
  * che un telefono ha perso il Wi-Fi (§8.8).
  */
 import type { Progetto, Telecamera } from '../dominio/progetto.js'
-import type { Livello, TelecameraViva } from '../api/protocollo.js'
+import type { Livello, Orientamento, TelecameraViva } from '../api/protocollo.js'
 import { indirizziLocali, virtuale } from '../ambiente.js'
-import { SpezzatoreAnnexB } from './annexb.js'
+import { SpezzatoreAnnexB, geometriaDi } from './annexb.js'
 import {
   accendiStreaming,
   apriFlussoAudio,
@@ -40,7 +40,8 @@ export interface AscoltatoreByte {
   caduto(motivo: string): void
 }
 
-export interface TelecameraVivaInterna {
+/** Cio che si sa di una Telecamera dal giro di `/info.json`. */
+interface Vista {
   readonly raggiungibile: boolean
   readonly batteria: number | null
   readonly segnale: number | null
@@ -48,6 +49,22 @@ export interface TelecameraVivaInterna {
   readonly vistoIl: string | null
   readonly dettagli: Dettagli | null
   readonly inIdentificazione: boolean
+}
+
+/**
+ * Cio che si sa di una Telecamera dal **video**, che `/info.json` non dice:
+ * la geometria vera dell'ultimo fotogramma chiave e da che verso e girata.
+ */
+interface Geometria {
+  readonly geometria: string
+  readonly orientamento: Orientamento | null
+  readonly cambiatoIl: string | null
+}
+
+export interface TelecameraVivaInterna extends Vista {
+  readonly geometria: string | null
+  readonly orientamento: Orientamento | null
+  readonly orientamentoCambiatoIl: string | null
 }
 
 export interface OpzioniGestore {
@@ -59,11 +76,37 @@ export interface OpzioniGestore {
 }
 
 /**
- * La geometria che Regia impone al telefono durante la registrazione
- * (ADR 0012): nativa sull'obiettivo del telefono nuovo, standard ovunque.
- * Concreta apposta -- un valore `WxH` spegne l'adattamento, un'etichetta no.
+ * La geometria che Regia chiede al telefono (ADR 0014; sostituisce il valore
+ * fisso dell'ADR 0012).
+ *
+ * **Perche non basta un valore solo.** Il telefono non ritaglia mai: impagina
+ * cio che l'obiettivo gli da dentro la geometria che gli si chiede, e riempie
+ * il resto di nero. Misurato il 19 settembre 2026: con `1280x720` chiesto a un
+ * telefono in piedi l'immagine utile era **405x720**; con `1280x960` era
+ * **720x960**, con 280 px di nero per lato; con **`960x1280`** il fotogramma
+ * usciva **pieno**. Il nero si paga due volte, in banda e sul disco, e chi
+ * guarda lo legge come un'inquadratura tagliata.
+ *
+ * **Da cosa dipende.** Non dalla rotazione dichiarata -- quella dice come si
+ * vuole *vedere* il video, non come il telefono lo *produce* -- ma dal verso
+ * in cui il sensore e montato. `sensorOrientation` vale 90 o 270 su quasi
+ * tutti i telefoni: il sensore e coricato rispetto al verso naturale dello
+ * schermo, l'app raddrizza l'immagine, e cio che esce e **verticale**. Serve
+ * quindi un fotogramma verticale per contenerla senza bande; poi, se la
+ * Telecamera e montata di traverso, e la rotazione dell'ADR 0014 a raddrizzare
+ * la veduta -- nell'anteprima e nel file, non qui.
+ *
+ * Senza quel dato (`null`, il telefono non ha ancora risposto) si chiede
+ * comunque la geometria verticale: e il caso di quasi ogni telefono, e
+ * sbagliarla costa solo bande nere fino al giro di `/info.json` dopo.
+ *
+ * Il valore resta **concreto** apposta, come chiede l'ADR 0012: un `WxH`
+ * spegne l'adattamento, un'etichetta come `high` no.
  */
-export const RISOLUZIONE_RIPRESA = '1280x720'
+export function risoluzioneRipresa(orientamentoSensore: number | null): string {
+  const coricato = orientamentoSensore === null || orientamentoSensore === 90 || orientamentoSensore === 270
+  return coricato ? '960x1280' : '1280x960'
+}
 
 /** Ogni quanto si chiede a ogni telefono come sta. */
 const CADENZA_INFO_MS = 3000
@@ -97,6 +140,21 @@ export function fpsVisibile(fpsPubblicato: number, ultimoFotogrammaIl: number, o
   return ora - ultimoFotogrammaIl > FPS_STALLO_MS ? 0 : fpsPubblicato
 }
 
+/**
+ * Da che verso e girata un'immagine di questa geometria (ADR 0013).
+ *
+ * `verticale` se e piu alta che larga, `orizzontale` altrimenti: un quadrato
+ * conta come orizzontale, che e il verso di un sensore lasciato in pace.
+ * `null` se non e un `WxH` leggibile. Puro e provato a parte perche e l'unica
+ * regola dell'orientamento: il resto e confrontare il verso di prima con
+ * quello di adesso.
+ */
+export function orientamentoDi(geometria: string): Orientamento | null {
+  const m = /^(\d+)x(\d+)$/.exec(geometria)
+  if (!m) return null
+  return Number(m[2]) > Number(m[1]) ? 'verticale' : 'orizzontale'
+}
+
 interface Sessione {
   flusso: FlussoAperto | null
   spezzatore: SpezzatoreAnnexB
@@ -114,7 +172,20 @@ interface Sessione {
 }
 
 export class GestoreTelecamere {
-  private readonly viste = new Map<string, TelecameraVivaInterna>()
+  private readonly viste = new Map<string, Vista>()
+  /**
+   * L'ultima geometria vista per Telecamera. Vive fuori dalla sessione di
+   * proposito: se il telefono viene girato mentre nessuno lo guarda, il cambio
+   * si vede al primo fotogramma chiave della sessione dopo, e va detto allora.
+   */
+  private readonly geometrie = new Map<string, Geometria>()
+  /**
+   * `sensorOrientation` dell'obiettivo attivo di ogni Telecamera, come l'ha
+   * detto `/info.json`. Da qui si decide che geometria chiedere al telefono
+   * (`risoluzioneRipresa`): e l'unico indizio che il telefono da sulla forma
+   * dell'immagine che produce.
+   */
+  private readonly sensori = new Map<string, number>()
   private readonly sessioni = new Map<string, Sessione>()
   private readonly ascoltatoriByte = new Map<string, Set<AscoltatoreByte>>()
   private anteprime = new Set<string>()
@@ -143,7 +214,14 @@ export class GestoreTelecamere {
   viva(id: string): TelecameraVivaInterna | undefined {
     const v = this.viste.get(id)
     if (!v) return undefined
-    return { ...v, inIdentificazione: this.identificazione === id }
+    const g = this.geometrie.get(id)
+    return {
+      ...v,
+      inIdentificazione: this.identificazione === id,
+      geometria: g?.geometria ?? null,
+      orientamento: g?.orientamento ?? null,
+      orientamentoCambiatoIl: g?.cambiatoIl ?? null,
+    }
   }
 
   /**
@@ -217,6 +295,12 @@ export class GestoreTelecamere {
     }
     for (const id of [...this.viste.keys()]) {
       if (!conosciute.has(id)) this.viste.delete(id)
+    }
+    for (const id of [...this.geometrie.keys()]) {
+      if (!conosciute.has(id)) this.geometrie.delete(id)
+    }
+    for (const id of [...this.sensori.keys()]) {
+      if (!conosciute.has(id)) this.sensori.delete(id)
     }
   }
 
@@ -366,14 +450,30 @@ export class GestoreTelecamere {
    * `zTelecamera` non li ha, e Regia non li tocca mai. La risoluzione era
    * nella stessa frase fino all'ADR 0012: ora Regia la tocca, ma solo a
    * runtime e solo durante il REC (`fissaRisoluzione`), quindi nel preset
-   * continua a non stare. Il giorno in cui una di queste voci entra nel
-   * progetto, entra anche qui.
+   * continua a non stare. La rotazione Regia continua a non toccarla, ma
+   * dall'ADR 0013 la **legge**, dal video (`annotaGeometria`): e un'altra
+   * cosa. Il giorno in cui una di queste voci entra nel progetto, entra
+   * anche qui.
    */
   async preparaTelecamera(t: Telecamera): Promise<void> {
     const a = this.accesso(t)
     // Lo streaming e la ragione per cui la Telecamera esiste: se non si accende
     // chi ha aggiunto il telefono deve saperlo, e l'errore esce di qui.
     await accendiStreaming(a)
+    try {
+      // La geometria entra nel preset con l'ADR 0014: ora Regia sa come quella
+      // Telecamera va inquadrata (la rotazione sta nel progetto), e un telefono
+      // lasciato su un'altra geometria darebbe un'anteprima impaginata fra
+      // bande nere fino al primo REC. Non fa fallire l'aggiunta: e il motivo
+      // per cui sta qui dentro e non sopra, accanto allo streaming.
+      await this.fissaRisoluzione(t)
+    } catch (e) {
+      this.opzioni.suDiario(
+        'attenzione',
+        `Non sono riuscito a fissare la geometria di "${t.nome}" (${(e as Error).message}): ` +
+          'l anteprima potrebbe avere bande nere.',
+      )
+    }
     try {
       await comanda(a, { torch: 'off' })
     } catch (e) {
@@ -390,26 +490,44 @@ export class GestoreTelecamere {
   }
 
   /**
-   * Fissa la risoluzione per la durata della ripresa (ADR 0012).
+   * Mette il telefono nella geometria che Regia si aspetta (ADR 0012 e 0014).
    *
-   * Con `streamRes: "auto"` il telefono cambia geometria a meta stream, e una
-   * registrazione `-c:v copy` che cambia dimensione a meta si blocca nei
-   * lettori rigidi. Serve la forma `WxH`, non `low|medium|high`: le etichette
-   * toccano solo il *target* di `auto` e lasciano vivo l'adattamento (letto in
-   * `StreamingService.kt`, fatti verificati). Durante il REC questa scelta
-   * vince su un `auto` impostato a mano dall'operatore -- la stabilita batte
-   * la preferenza adattiva, e il Diario lo dice. A fine REC non si ripristina
-   * niente, coerente col preset: il telefono resta come Regia l'ha lasciato.
+   * Due ragioni, tutte e due misurate. Con `streamRes: "auto"` il telefono
+   * cambia geometria a meta stream, e una registrazione `-c:v copy` che cambia
+   * dimensione si blocca nei lettori rigidi (ADR 0012); e con una geometria
+   * che non ha il rapporto dell'obiettivo il telefono impagina l'immagine fra
+   * bande nere, buttando via banda e pixel (ADR 0014). Serve la forma `WxH`,
+   * non `low|medium|high`: le etichette toccano solo il *target* di `auto` e
+   * lasciano vivo l'adattamento (letto in `StreamingService.kt`).
+   *
+   * Si chiama in tre momenti: quando si aggiunge una Telecamera, quando
+   * l'Operatore ne dichiara la rotazione, e all'accensione del REC -- cioe
+   * ogni volta che Regia sa qualcosa di nuovo su come quella Telecamera va
+   * inquadrata. Se il telefono e gia come si vuole non si manda niente.
+   *
+   * Questa scelta vince su un `auto` impostato a mano sul telefono, e il
+   * Diario lo dice. Non si ripristina mai niente, coerente col preset: il
+   * telefono resta come Regia l'ha lasciato.
    */
   async fissaRisoluzione(t: Telecamera): Promise<void> {
     const prima = this.viste.get(t.id)?.dettagli?.risoluzione
-    await comanda(this.accesso(t), { resolution: RISOLUZIONE_RIPRESA })
+    const voluta = risoluzioneRipresa(this.sensori.get(t.id) ?? null)
+    if (prima === voluta) return
+    await comanda(this.accesso(t), { resolution: voluta })
+    // Cio che si e appena chiesto si segna subito, senza aspettare il giro di
+    // `/info.json` che arriva ogni tre secondi: chi chiama due volte di fila --
+    // l'Operatore che gira la Telecamera e poi preme REC -- non deve far
+    // ri-legare la camera al telefono due volte per la stessa geometria.
+    const vista = this.viste.get(t.id)
+    if (vista?.dettagli) {
+      this.viste.set(t.id, { ...vista, dettagli: { ...vista.dettagli, risoluzione: voluta } })
+    }
     this.opzioni.suDiario(
       'info',
       prima === 'auto'
-        ? `Risoluzione di "${t.nome}" fissata a ${RISOLUZIONE_RIPRESA} per la ripresa: ` +
-            'una registrazione vuole una geometria stabile, e vince su "auto".'
-        : `Risoluzione di "${t.nome}" fissata a ${RISOLUZIONE_RIPRESA} per la ripresa.`,
+        ? `Risoluzione di "${t.nome}" fissata a ${voluta}: una ripresa vuole una geometria ` +
+            'stabile, e vince su "auto".'
+        : `Risoluzione di "${t.nome}" fissata a ${voluta}.`,
     )
   }
 
@@ -441,6 +559,10 @@ export class GestoreTelecamere {
     const prima = this.viste.get(t.id)
     try {
       const info = await leggiInfo(this.accesso(t))
+      // Il verso del sensore decide che geometria chiedere al telefono
+      // (`risoluzioneRipresa`): si tiene da parte a ogni giro, perche cambia
+      // quando si cambia obiettivo.
+      if (info.orientamentoSensore !== null) this.sensori.set(t.id, info.orientamentoSensore)
       const sessione = this.sessioni.get(t.id)
       this.viste.set(t.id, {
         raggiungibile: true,
@@ -491,6 +613,7 @@ export class GestoreTelecamere {
         if (chiave) {
           sessione.ultimoIdr = unita
           sessione.ultimoIdrIl = Date.now()
+          this.annotaGeometria(t.id, unita)
         }
         sessione.fotogrammiNelSecondo++
         sessione.ultimoFotogrammaIl = Date.now()
@@ -511,6 +634,19 @@ export class GestoreTelecamere {
   private async collega(t: Telecamera, sessione: Sessione): Promise<void> {
     if (this.sessioni.get(t.id) !== sessione) return
     const a = this.accesso(t)
+    // La geometria si mette a posto **prima** di aprire il flusso, non dopo:
+    // cambiarla fa ri-legare la camera al telefono, e un flusso appena aperto
+    // cadrebbe subito. Qui si intercetta il caso che sfuggiva a tutti gli
+    // altri -- riaprire un progetto con un telefono lasciato su un'altra
+    // geometria -- e l'anteprima sarebbe rimasta impaginata fra bande nere
+    // fino al primo REC. Se e gia giusta non si manda niente (ADR 0014).
+    try {
+      await this.fissaRisoluzione(t)
+    } catch {
+      // Un telefono che non risponde qui non risponde nemmeno al flusso: se ne
+      // occupa il ramo sotto, che sa anche riprovare.
+    }
+    if (this.sessioni.get(t.id) !== sessione) return
     try {
       // Lo streaming e persistente fra i riavvii, ma "persistente" vuol dire
       // "come l'ha lasciato l'ultima volta", e l'ultima volta puo essere stata
@@ -567,6 +703,51 @@ export class GestoreTelecamere {
     if (s.riprova) clearTimeout(s.riprova)
     s.flusso?.chiudi()
     s.spezzatore.chiudi()
+  }
+
+  /**
+   * L'orientamento si legge dal video, non si chiede al telefono (ADR 0013).
+   *
+   * L'SPS viaggia con ogni fotogramma chiave (annexb.ts, misurato) e dichiara
+   * la geometria vera di cio che esce: con la rotazione cotta nel flusso
+   * (android-ip-camera 0.13.1) un telefono in piedi manda `720x1280`, e
+   * `/info.json` non lo dice -- riporta la preferenza `rotate`, non il verso
+   * del video che sta uscendo (fatti verificati). Quindi il posto in cui ci
+   * si accorge che una Telecamera e stata girata e questo: un fotogramma
+   * chiave la cui geometria ha scambiato gli assi rispetto all'ultima vista.
+   *
+   * Si confronta l'**orientamento**, non la geometria. Con `streamRes: "auto"`
+   * la geometria cambia da sola a ogni rebind (1024x576 -> 720x480, ADR 0012)
+   * senza che nessuno abbia toccato il telefono, e scriverlo nel Diario ogni
+   * volta sarebbe rumore; un cambio di verso, invece, e quasi sempre una mano
+   * -- un telefono girato, caduto o rimontato -- ed e cio che l'Operatore
+   * vuole sapere. Un giro di 180 gradi non scambia gli assi, e da qui non si
+   * vede.
+   */
+  private annotaGeometria(id: string, unita: Uint8Array): void {
+    const geometria = geometriaDi(unita)
+    if (geometria === null) return
+    const prima = this.geometrie.get(id)
+    if (prima?.geometria === geometria) return
+    const orientamento = orientamentoDi(geometria)
+    let cambiatoIl = prima?.cambiatoIl ?? null
+    // Se il fotogramma e diventato quello che Regia stessa ha appena chiesto
+    // (ADR 0014), non c'e niente da segnalare: girare una Telecamera cambia la
+    // geometria per definizione, e avvisarne l'Operatore sarebbe Regia che si
+    // spaventa di se stessa.
+    const chiesta = risoluzioneRipresa(this.sensori.get(id) ?? null)
+    if (geometria !== chiesta && prima?.orientamento && orientamento && prima.orientamento !== orientamento) {
+      cambiatoIl = new Date().toISOString()
+      // Il nome si rilegge adesso: la sessione puo essere piu vecchia di una
+      // rinomina, e il Diario deve dire il nome che l'Operatore vede.
+      const nome = this.opzioni.progetto().telecamere.find((t) => t.id === id)?.nome ?? id
+      this.opzioni.suDiario(
+        'attenzione',
+        `Il video di "${nome}" ha ruotato: il fotogramma e passato da ${prima.geometria} ` +
+          `a ${geometria}.`,
+      )
+    }
+    this.geometrie.set(id, { geometria, orientamento, cambiatoIl })
   }
 
   /**

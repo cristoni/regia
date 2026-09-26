@@ -25,6 +25,15 @@
 const FPS_NOMINALE = 20
 
 export class DecodificatoreVideo {
+  /**
+   * Quanto girare l'immagine in senso orario, in gradi (ADR 0014).
+   *
+   * Si applica al disegno, non al decoder: i byte restano quelli del telefono
+   * e il `VideoDecoder` non si accorge di niente -- cambiarla non costa un
+   * fotogramma chiave, quindi la cella non lampeggia quando l'Operatore gira
+   * una Telecamera.
+   */
+  rotazione: 0 | 90 | 180 | 270 = 0
   private decoder: VideoDecoder | null = null
   private contesto: CanvasRenderingContext2D | null
   private prossimoTimestamp = 0
@@ -114,11 +123,25 @@ export class DecodificatoreVideo {
       fotogramma.close()
       return
     }
-    // La tela si ridimensiona solo quando la risoluzione cambia davvero:
+    // Con un quarto di giro la tela scambia i lati, o l'immagine ruotata
+    // uscirebbe dai bordi. La tela si ridimensiona solo quando serve davvero:
     // riassegnare `width` la ripulisce e fa lampeggiare la cella.
-    if (this.tela.width !== fotogramma.displayWidth) this.tela.width = fotogramma.displayWidth
-    if (this.tela.height !== fotogramma.displayHeight) this.tela.height = fotogramma.displayHeight
-    c.drawImage(fotogramma, 0, 0)
+    const scambia = this.rotazione === 90 || this.rotazione === 270
+    const larghezza = scambia ? fotogramma.displayHeight : fotogramma.displayWidth
+    const altezza = scambia ? fotogramma.displayWidth : fotogramma.displayHeight
+    if (this.tela.width !== larghezza) this.tela.width = larghezza
+    if (this.tela.height !== altezza) this.tela.height = altezza
+    if (this.rotazione === 0) {
+      c.drawImage(fotogramma, 0, 0)
+    } else {
+      // Angoli positivi girano in senso orario, perche sulla tela l'asse Y
+      // punta in basso: `rotazione` e in gradi orari e va usata cosi com'e.
+      c.save()
+      c.translate(larghezza / 2, altezza / 2)
+      c.rotate((this.rotazione * Math.PI) / 180)
+      c.drawImage(fotogramma, -fotogramma.displayWidth / 2, -fotogramma.displayHeight / 2)
+      c.restore()
+    }
     // `close()` **deve** essere chiamato: un `VideoFrame` tiene un buffer della
     // GPU, e dimenticarne uno per fotogramma esaurisce la memoria video in
     // pochi minuti. Non basta lasciarlo al garbage collector.

@@ -31,7 +31,7 @@ fatto e criteri irraggiungibili trovati durante l'analisi. Quando `project.md` e
 ## Comandi
 
 ```bash
-npm test                      # 260 test; 5 si saltano senza ffprobe nel PATH (registrazione). Il
+npm test                      # 281 test; 5 si saltano senza ffprobe nel PATH (registrazione). Il
                               # resto usa l'ffmpeg di vendor/. Concorrenza 1: ogni motore avvia un
                               # thread audio. Su Linux NON deve esserci uno snapserver vivo su 1705,
                               # nemmeno orfano: la suite non esce (fatti verificati, 18 settembre)
@@ -178,7 +178,7 @@ completa minuti dopo con un riferimento temporale vecchio.
   la Sede, ffmpeg o le telecamere. Ogni riga è marcata `[sorgente]` (letto nel codice upstream),
   `[misurato]` (eseguito su questa macchina) o `[surrogato]` (misurato su un sostituto, da rifare).
   Quando il codice sembra strano, la ragione è quasi sempre lì.
-- **`docs/adr/`** — undici decisioni, ciascuna con le alternative scartate e perché. Alcune sono
+- **`docs/adr/`** — quattordici decisioni, ciascuna con le alternative scartate e perché. Alcune sono
   state **corrette dopo la ricerca**: la correzione è in fondo al file, non sostituisce il testo.
 - **`docs/scostamenti-dal-documento-di-progetto.md`** — errori e criteri irraggiungibili di
   `project.md`, da riportare al committente.

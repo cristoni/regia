@@ -133,6 +133,58 @@ describe('archivio del progetto', () => {
   })
 })
 
+/**
+ * ADR 0014: la rotazione dichiarata dall'Operatore vive nel progetto, perche
+ * un telefono montato di traverso ci resta tutta la serata. Ha un default
+ * proprio per non chiedere una migrazione: un progetto scritto prima che il
+ * campo esistesse deve aprirsi, con le Telecamere dritte.
+ */
+describe('la rotazione delle Telecamere nel progetto (ADR 0014)', () => {
+  it('apre un progetto vecchio, senza il campo, e mette le Telecamere dritte', async () => {
+    const d = await cartellaTemporanea()
+    const percorso = path.join(d, 'progetto.json')
+    const p = progettoDiProva() as Progetto & { telecamere: unknown[] }
+    p.telecamere.push({
+      id: 't1', nome: 'Occhio', host: '192.168.1.7', porta: 4444,
+      https: false, utente: null, passwordCifrata: null, zonaId: 'z1',
+    })
+    await fs.writeFile(percorso, JSON.stringify(p), 'utf8')
+
+    const esito = await new ArchivioProgetto(percorso).carica()
+    assert.equal(esito.stato, 'caricato', `non si e aperto: ${JSON.stringify(esito)}`)
+    if (esito.stato !== 'caricato') return
+    assert.equal(esito.progetto.telecamere[0]!.rotazione, 0)
+  })
+
+  it('rilegge la rotazione che ha scritto', async () => {
+    const d = await cartellaTemporanea()
+    const a = new ArchivioProgetto(path.join(d, 'progetto.json'))
+    const p = progettoDiProva()
+    p.telecamere.push({
+      id: 't1', nome: 'Occhio', host: '192.168.1.7', porta: 4444,
+      https: false, utente: null, passwordCifrata: null, zonaId: 'z1', rotazione: 270,
+    })
+    await a.salvaOra(p)
+    const esito = await new ArchivioProgetto(path.join(d, 'progetto.json')).carica()
+    assert.equal(esito.stato, 'caricato')
+    if (esito.stato !== 'caricato') return
+    assert.equal(esito.progetto.telecamere[0]!.rotazione, 270)
+  })
+
+  it('rifiuta un angolo che non e un quarto di giro', async () => {
+    const d = await cartellaTemporanea()
+    const percorso = path.join(d, 'progetto.json')
+    const p = progettoDiProva() as Progetto & { telecamere: unknown[] }
+    p.telecamere.push({
+      id: 't1', nome: 'Storta', host: '192.168.1.7', porta: 4444,
+      https: false, utente: null, passwordCifrata: null, zonaId: 'z1', rotazione: 45,
+    })
+    await fs.writeFile(percorso, JSON.stringify(p), 'utf8')
+    const esito = await new ArchivioProgetto(percorso).carica()
+    assert.notEqual(esito.stato, 'caricato', 'un angolo storto non deve passare lo schema')
+  })
+})
+
 describe('invarianti del dominio', () => {
   it('accetta un progetto coerente', () => {
     assert.deepEqual(violazioni(progettoDiProva()), [])

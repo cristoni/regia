@@ -120,8 +120,12 @@ describe('spezzatore Annex-B', () => {
  * SPS veri, generati con libx264 (`ffmpeg -f lavfi -i color=black:size=WxH
  * -c:v libx264 -profile:v ...`) ed estratti dal flusso: gli hex qui sotto sono
  * la NAL SPS cosi com'e, coi byte di prevenzione dell'emulazione dentro
- * (`00 00 03` compare in tutti). Coprono il profilo esteso e il baseline, e le
- * geometrie che vogliono il cropping (1080 e 300 non sono multipli di 16).
+ * (`00 00 03` compare in tutti quelli di libx264). Coprono il profilo esteso e
+ * il baseline, e le geometrie che vogliono il cropping (1080 e 300 non sono
+ * multipli di 16). Quelli **verticali** vengono da libopenh264 (l'ffmpeg in
+ * `vendor/` non ha libx264): sono il verso che manda un telefono in piedi con
+ * la rotazione cotta nel flusso (ADR 0013), e l'orientamento si decide su
+ * questi numeri.
  */
 describe('geometriaDi: la geometria dichiarata dall SPS (ADR 0012)', () => {
   const casi: [string, string, string][] = [
@@ -130,6 +134,9 @@ describe('geometriaDi: la geometria dichiarata dall SPS (ADR 0012)', () => {
     ['1920x1080', 'high (crop verticale)', '67640028acd940780227e5c044000003000400000300f03c60c658'],
     ['300x180', 'high (crop orizzontale)', '6764000dacd941319ee7c044000003000400000300f03c50a658'],
     ['640x360', 'baseline', '6742c01ed900a02ff970110000030001000003003c0f162e48'],
+    ['720x1280', 'baseline verticale (libopenh264)', '6742c01f8c680b40a1b0101e1108d4'],
+    ['360x640', 'baseline verticale (libopenh264)', '6742c01e8c6817051e5f0101e1108d40'],
+    ['1080x1920', 'baseline verticale con crop (libopenh264)', '6742c0288c6804403c797c0407844235'],
   ]
 
   for (const [geometria, profilo, hex] of casi) {

@@ -14,7 +14,7 @@ import type { AltoparlanteVivo, Stato, TelecameraViva } from '../../engine/api/p
 import { Elenco, attributo, classe, el, pulsanteConferma, testo, valore, type Voce } from '../nucleo/dom'
 import { campoTesto, cursoreVolume, luce, menuZone } from '../nucleo/comuni'
 import type { Contesto, Schermata } from '../nucleo/schermata'
-import { daQuando } from '../nucleo/viste'
+import { daQuando, descriviGeometria, ora, ruotataDaPoco } from '../nucleo/viste'
 
 export class Dispositivi implements Schermata {
   readonly elemento = el('section', {})
@@ -75,6 +75,7 @@ export class Dispositivi implements Schermata {
           el('th', { testo: 'Indirizzo' }),
           el('th', { testo: 'Batteria' }),
           el('th', { testo: 'Wi-Fi' }),
+          el('th', { testo: 'Fotogramma' }),
           el('th', {}),
         ),
       ),
@@ -275,6 +276,22 @@ export class Dispositivi implements Schermata {
     const indirizzo = el('span', { class: 'conteggi' })
     const batteria = el('span', { class: 'conteggi' })
     const segnale = el('span', { class: 'conteggi' })
+    // La geometria del fotogramma che arriva, letta dal video stesso
+    // (ADR 0013). Resta vuota finche nessuno ha guardato questa Telecamera --
+    // il flusso si apre solo se qualcuno lo guarda.
+    const orientamento = el('span', { class: 'conteggi' })
+    // Il giro dell'inquadratura (ADR 0014). Sta anche qui, oltre che sulla
+    // cella, perche questa e la schermata del pomeriggio: si monta un telefono
+    // di traverso e lo si dichiara subito, senza cercare la sua cella.
+    const gira = el('button', { class: 'pulsante piccolo', type: 'button', testo: '0°' })
+    let rotazione: 0 | 90 | 180 | 270 = 0
+    gira.addEventListener('click', () =>
+      this.ctx.manda({
+        tipo: 'telecamera.rotazione',
+        telecameraId: iniziale.id,
+        gradi: (((rotazione + 90) % 360) as 0 | 90 | 180 | 270),
+      }),
+    )
 
     const identifica = el('button', {
       class: 'pulsante piccolo',
@@ -308,6 +325,7 @@ export class Dispositivi implements Schermata {
       el('td', {}, indirizzo),
       el('td', {}, batteria),
       el('td', {}, segnale),
+      el('td', {}, el('div', { class: 'fila' }, orientamento, gira)),
       el('td', { class: 'comandi' }, identifica, ' ', rec, ' ', rimuovi),
     )
 
@@ -320,6 +338,27 @@ export class Dispositivi implements Schermata {
         testo(indirizzo, `${t.https ? 'https' : 'http'}://${t.host}:${t.porta}`)
         testo(batteria, t.batteria === null ? '—' : `${t.batteria}%`)
         testo(segnale, t.segnale === null ? '—' : `${t.segnale}%`)
+        testo(orientamento, descriviGeometria(t) ?? '—')
+        rotazione = t.rotazione
+        testo(gira, `${t.rotazione}°`)
+        classe(gira, 'principale', t.rotazione !== 0)
+        attributo(
+          gira,
+          'title',
+          'Gira l inquadratura di quarto in quarto, in senso orario. Non tocca il ' +
+            'telefono: gira l anteprima e le registrazioni nuove.',
+        )
+        const daPoco = ruotataDaPoco(t)
+        orientamento.style.color = daPoco ? 'var(--attenzione)' : ''
+        attributo(
+          orientamento,
+          'title',
+          t.orientamentoCambiatoIl
+            ? `il video ha ruotato alle ${ora(t.orientamentoCambiatoIl)}`
+            : 'il fotogramma che arriva, misurato sul video. Non dice come sta ' +
+              'l immagine dentro il fotogramma: il telefono puo impaginarne una ' +
+              'verticale fra due bande nere',
+        )
         classe(riga, 'assente', !t.raggiungibile)
 
         identifica.disabled =

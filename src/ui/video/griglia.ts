@@ -17,7 +17,13 @@
  */
 import type { Comando, Stato } from '../../engine/api/protocollo'
 import { Elenco, attributo, classe, el, testo, type Voce } from '../nucleo/dom'
-import { celleVideo, colonneGriglia, type CellaVideo } from '../nucleo/viste'
+import {
+  celleVideo,
+  colonneGriglia,
+  descriviGeometria,
+  ruotataDaPoco,
+  type CellaVideo,
+} from '../nucleo/viste'
 import { DecodificatoreVideo } from './decodificatore'
 
 interface VoceCella extends Voce<CellaVideo> {
@@ -117,15 +123,36 @@ export class GrigliaVideo {
       testo(rec, 'Fermare?')
       scadenzaArmo = window.setTimeout(disarma, 4000)
     })
+    // Il giro dell'inquadratura (ADR 0014). Sta sulla cella perche e qui che
+    // se ne vede l'effetto: si preme finche la stanza non e dritta. Un clic
+    // solo, senza conferma, perche e la cosa piu facile da disfare che ci sia
+    // -- altri tre clic e si torna dov'era.
+    const gira = el('button', { class: 'gira', type: 'button', testo: '0°' })
+    let rotazione: 0 | 90 | 180 | 270 = 0
+    gira.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.comanda({
+        tipo: 'telecamera.rotazione',
+        telecameraId: id,
+        gradi: (((rotazione + 90) % 360) as 0 | 90 | 180 | 270),
+      })
+    })
     const nomeZona = el('span', { class: 'zona-nome' })
     const nomeCamera = el('span', { class: 'nome' })
     const spia = el('span', { class: 'spia' })
     const assente = el('div', { class: 'assente' })
+    // Il fotogramma ha appena scambiato gli assi (ADR 0013): il telefono ha
+    // ruotato il video. Sta sulla cella e non solo nella barra di stato perche
+    // l'Operatore guarda la griglia, e deve vedere **quale**. Se ne va da sola
+    // dopo un minuto; nella spia resta la geometria.
+    const ruotata = el('span', { class: 'rotazione', hidden: true })
     const cella = el(
       'div',
       { class: 'cella' },
       tela,
       rec,
+      gira,
+      ruotata,
       assente,
       el('div', { class: 'etichetta' }, nomeZona, nomeCamera, spia),
     )
@@ -157,12 +184,30 @@ export class GrigliaVideo {
         testo(
           spia,
           [
+            // Il fotogramma misurato sul flusso, non la risoluzione chiesta al
+            // telefono: le due possono non coincidere.
+            descriviGeometria(t),
             t.fpsAnteprima !== null ? `${t.fpsAnteprima} fps` : null,
             t.batteria !== null ? `${t.batteria}%` : null,
             t.segnale !== null ? `${t.segnale}% Wi-Fi` : null,
           ]
             .filter(Boolean)
             .join('  ·  '),
+        )
+        const daPoco = ruotataDaPoco(t)
+        ruotata.hidden = !daPoco
+        if (daPoco) testo(ruotata, `video ruotato · ${t.geometria ?? ''}`)
+        classe(cella, 'ruotata', daPoco)
+
+        rotazione = t.rotazione
+        if (decodificatore) decodificatore.rotazione = rotazione
+        testo(gira, `${t.rotazione}°`)
+        classe(gira, 'attiva', t.rotazione !== 0)
+        attributo(
+          gira,
+          'title',
+          `Gira l'inquadratura di "${t.nome}" (ora ${t.rotazione}°). ` +
+            'Vale anche per le registrazioni nuove.',
         )
         if (inRegistrazione !== t.inRegistrazione) {
           inRegistrazione = t.inRegistrazione
@@ -193,6 +238,7 @@ export class GrigliaVideo {
       },
       fotogramma: (chiave, dati) => {
         decodificatore ??= new DecodificatoreVideo(tela, avvisa)
+        decodificatore.rotazione = rotazione
         ultimoFotogramma = Date.now()
         assente.hidden = true
         decodificatore.fotogramma(chiave, dati)

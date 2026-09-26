@@ -69,6 +69,23 @@ un suono breve se è un Altoparlante, un lampo di torcia se è una Telecamera. �
 principale con cui si abbinano i Telefoni alle Zone durante il setup.
 _Evita_: ping, test, localizza, blink
 
+**Rotazione**:
+Di quanto Regia gira l'immagine di una Telecamera perché si veda dritta: nessuno, un quarto, metà
+o tre quarti di giro in senso orario. **La dichiara l'Operatore** quando monta il telefono, non si
+indovina dal video, e vale finché non la cambia. Regia la applica all'anteprima e alle
+registrazioni nuove; il telefono non ne sa niente.
+_Evita_: orientamento (che è un fatto del telefono, e il telefono non lo dice), flip, transpose
+
+**Fotogramma**:
+La geometria del video che una Telecamera manda davvero, per esempio 1280×720: la misura Regia
+sul flusso, non la chiede al telefono. **Non dice come sta l'immagine dentro**: molti telefoni
+impaginano un'immagine verticale dentro un fotogramma orizzontale, fra due bande nere, e da
+fuori i due casi sono identici. Quando il fotogramma scambia gli assi il telefono ha ruotato il
+video, e Regia lo segnala per un minuto nella barra di stato e sulla cella, e lo scrive nel
+Diario.
+_Evita_: risoluzione (che è la preferenza scritta sul telefono, un'altra cosa), orientamento e
+portrait/landscape (promettono di sapere come sta l'immagine, e Regia non lo sa)
+
 ### Il suono
 
 **Suono**:

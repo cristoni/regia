@@ -267,6 +267,10 @@ export class MotoreRegia implements Motore {
           utente: t.utente,
           conPassword: t.passwordCifrata !== null,
           dettagli: v?.dettagli ?? null,
+          geometria: v?.geometria ?? null,
+          orientamento: v?.orientamento ?? null,
+          orientamentoCambiatoIl: v?.orientamentoCambiatoIl ?? null,
+          rotazione: t.rotazione,
           inIdentificazione: v?.inIdentificazione ?? false,
         }
       }),
@@ -620,6 +624,7 @@ export class MotoreRegia implements Motore {
           utente: c.utente,
           passwordCifrata: null,
           zonaId: null,
+          rotazione: 0,
         }
         if (c.password) this.impostaPassword(t, c.password)
         this.progetto.telecamere.push(t)
@@ -646,6 +651,45 @@ export class MotoreRegia implements Motore {
       case 'telecamera.identifica':
         await this.telecamere.identifica(c.telecameraId)
         break
+      case 'telecamera.rotazione': {
+        // ADR 0014: non si manda niente al telefono. Gira Regia, e la
+        // registrazione in corso non si tocca -- un segmento ha una sola
+        // matrice di visualizzazione, scritta quando ffmpeg e partito, e
+        // riscriverla vorrebbe dire chiudere il file a meta.
+        const t = this.telecamera(c.telecameraId)
+        if (t.rotazione === c.gradi) break
+        t.rotazione = c.gradi
+        this.diario(
+          'info',
+          c.gradi === 0
+            ? `"${t.nome}" torna dritta.`
+            : `"${t.nome}" girata di ${c.gradi}° in senso orario.` +
+              (this.registratore.stato().telecamere.includes(t.id)
+                ? ' La registrazione in corso tiene la rotazione di prima: vale dal prossimo file.'
+                : ''),
+        )
+        // Al telefono si chiede la geometria girata come la Telecamera
+        // (ADR 0014): un'immagine coricata dentro un fotogramma dritto ci sta
+        // solo fra due bande nere, e quelle bande sono banda di rete e pixel
+        // buttati. Non si aspetta l'esito: il flusso riparte da solo con la
+        // geometria nuova, e se il telefono non risponde lo dice il Diario.
+        //
+        // Mentre si registra **non si tocca**: cambiare geometria fa ri-legare
+        // la camera al telefono, cioe chiude il flusso, e la ripresa in corso
+        // si spezzerebbe in due file. La riga di Diario qui sopra ha appena
+        // promesso il contrario; la geometria nuova la prende il REC dopo.
+        if (!this.registratore.stato().telecamere.includes(t.id)) {
+          this.telecamere
+            .fissaRisoluzione(t)
+            .catch((e: unknown) =>
+              this.diario(
+                'attenzione',
+                `Non sono riuscito a cambiare la geometria di "${t.nome}": ${(e as Error).message}`,
+              ),
+            )
+        }
+        break
+      }
       case 'telecamera.rimuovi': {
         const t = this.telecamera(c.telecameraId)
         await this.registratore.spegni(c.telecameraId)
@@ -667,7 +711,7 @@ export class MotoreRegia implements Motore {
             id: this.nuovoId('t'),
             nome: t.nome ?? `Telecamera ${t.host.split('.').pop()}`,
             host: t.host, porta: t.porta, https: false,
-            utente: null, passwordCifrata: null, zonaId: null,
+            utente: null, passwordCifrata: null, zonaId: null, rotazione: 0,
           }
           this.progetto.telecamere.push(nuova)
         }

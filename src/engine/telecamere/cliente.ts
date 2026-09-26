@@ -37,6 +37,15 @@ export interface InfoTelecamera {
   readonly obiettivo: string | null
   readonly obiettiviDisponibili: readonly string[]
   readonly risoluzioniDisponibili: readonly string[]
+  /**
+   * Di quanto e montato di traverso il sensore dell'obiettivo **attivo**, in
+   * gradi (`cameras[].sensorOrientation`). Sui telefoni e quasi sempre 90 o
+   * 270: il sensore e coricato rispetto al verso naturale dello schermo, e
+   * l'app raddrizza l'immagine -- che percio esce **verticale**. E l'unico
+   * indizio che il telefono da sulla forma dell'immagine, e serve a chiedergli
+   * una geometria che riempia invece di una che lasci bande nere (ADR 0014).
+   */
+  readonly orientamentoSensore: number | null
   readonly streamingAttivo: boolean
   /** Il nome che il telefono da di se, se lo da. Utile come nome iniziale. */
   readonly nome: string | null
@@ -115,6 +124,12 @@ export function leggiInfoDa(j: Record<string, unknown>): InfoTelecamera {
     return []
   }
 
+  // L'obiettivo attivo si riconosce per `id` dentro `cameras[]`: gli altri
+  // quattro del telefono hanno un sensore montato in un altro verso, e quello
+  // che conta e' solo quello che sta riprendendo.
+  const obiettivi = Array.isArray(j['cameras']) ? (j['cameras'] as Record<string, unknown>[]) : []
+  const attivo = obiettivi.find((c) => String(c['id']) === String(s['cameraId']))
+
   return {
     batteria: numero(j['batteryPercent'] ?? s['batteryPercent']),
     segnale: numero(j['wifiStrength'] ?? s['wifiStrength']),
@@ -125,6 +140,7 @@ export function leggiInfoDa(j: Record<string, unknown>): InfoTelecamera {
     obiettivo: testo(s['cameraId']),
     obiettiviDisponibili: elenco('availableCameras', 'cameras', 'cameraIds'),
     risoluzioniDisponibili: elenco('availableResolutions', 'resolutions', 'streamResolutions'),
+    orientamentoSensore: numero(attivo?.['sensorOrientation']),
     streamingAttivo: s['streaming_enabled'] === true || j['streaming_enabled'] === true,
     nome: testo(j['deviceName'] ?? j['name'] ?? s['deviceName']),
   }

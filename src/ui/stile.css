@@ -815,6 +815,54 @@ main.schermo > section.produzione.attiva {
   letter-spacing: 0;
 }
 
+/* Il giro dell'inquadratura, dichiarato dall'Operatore (ADR 0014). Discreto:
+   si usa in Setup, e durante l'Evento non deve chiamare la mano. Sta a destra,
+   lontano dal REC, che e in alto a sinistra. */
+.cella .gira {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(20, 20, 26, 0.72);
+  border: 1px solid #4a4a58;
+  border-radius: 3px;
+  color: #b9b9c6;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 6px;
+}
+
+.cella .gira:hover {
+  border-color: var(--bordo-vivo);
+  color: #fff;
+}
+
+.cella .gira.attiva {
+  border-color: var(--accento);
+  color: #fff;
+}
+
+/* Il verso del video e appena cambiato: un telefono girato, caduto o
+   rimontato. Ambra, in alto a destra, per un minuto (FINESTRA_ROTAZIONE_MS):
+   dopo, resta solo "verticale"/"orizzontale" nella spia in basso. */
+.cella .rotazione {
+  position: absolute;
+  top: 32px;
+  right: 6px;
+  background: var(--attenzione);
+  border-radius: 3px;
+  color: #1a1a20;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+.cella.ruotata {
+  border-color: var(--attenzione);
+}
+
 @keyframes lampeggia {
   0%,
   49% {

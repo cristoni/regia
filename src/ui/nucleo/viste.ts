@@ -129,6 +129,61 @@ export function colonneGriglia(quante: number): number {
   return 4
 }
 
+/**
+ * Per quanto una Telecamera appena ruotata resta segnalata, nella barra di
+ * stato e sulla cella.
+ *
+ * Un minuto, perche e un evento e non una condizione: dopo, la Telecamera e
+ * semplicemente verticale o orizzontale, e lo dice la spia della cella. Ma nel
+ * minuto in cui e successo l'Operatore deve poterlo vedere con la coda
+ * dell'occhio anche se stava guardando un'altra cella: un telefono che cambia
+ * verso durante l'Evento e quasi sempre un telefono che qualcuno ha toccato, o
+ * che e caduto. Il Diario lo tiene per sempre.
+ */
+export const FINESTRA_ROTAZIONE_MS = 60_000
+
+/**
+ * Vero se il video di questa Telecamera ha ruotato da meno di un minuto.
+ *
+ * L'istante lo scrive il motore e il confronto lo fa il client, che puo essere
+ * il tablet della Fase 3 e avere un altro orologio. Un client **indietro**
+ * vedrebbe una differenza negativa e terrebbe acceso l'avviso per tutto lo
+ * sfasamento piu un minuto: per questo si pretende `>= 0`. Un client avanti di
+ * piu di un minuto non lo vedra affatto, e si preferisce cosi -- meglio un
+ * avviso mancato che uno acceso per mezz'ora su una Telecamera ferma.
+ */
+export function ruotataDaPoco(t: TelecameraViva, adesso = Date.now()): boolean {
+  if (!t.orientamentoCambiatoIl) return false
+  const quando = new Date(t.orientamentoCambiatoIl).getTime()
+  if (Number.isNaN(quando)) return false
+  const da = adesso - quando
+  return da >= 0 && da < FINESTRA_ROTAZIONE_MS
+}
+
+/** Le Telecamere ruotate da poco, l'ultima per prima. */
+export function ruotateDiRecente(stato: Stato, adesso = Date.now()): TelecameraViva[] {
+  return stato.telecamere
+    .filter((t) => ruotataDaPoco(t, adesso))
+    .sort((a, b) => b.orientamentoCambiatoIl!.localeCompare(a.orientamentoCambiatoIl!))
+}
+
+/**
+ * Il **fotogramma** che arriva da una Telecamera: `1280×720`.
+ *
+ * Solo la geometria, senza la parola "verticale" o "orizzontale": quella
+ * direbbe com'e girata l'immagine, e Regia non lo sa. Il telefono puo mandare
+ * un'immagine verticale impaginata dentro un fotogramma orizzontale, fra due
+ * bande nere, e da fuori i due casi sono identici (ADR 0013, correzione del 19
+ * settembre 2026). Qui si dice cio che si e misurato e basta.
+ *
+ * E la geometria **vista**, non `dettagli.risoluzione`, che e la preferenza
+ * scritta sul telefono e puo dire `auto`. `null` finche non si e visto un
+ * fotogramma chiave.
+ */
+export function descriviGeometria(t: TelecameraViva): string | null {
+  return t.geometria ? t.geometria.replace('x', '×') : null
+}
+
 // ------------------------------------------------------------ diagnostica
 
 // Il tipo vive nel contratto (`api/protocollo.ts`): qui si ri-esporta perche le
@@ -148,7 +203,7 @@ export interface Salute {
  * barra con la coda dell'occhio, e un elenco di sei righe non lo guarda
  * nessuno. Il dettaglio sta nelle altre schermate.
  */
-export function salute(stato: Stato): Salute {
+export function salute(stato: Stato, adesso = Date.now()): Salute {
   const grave = stato.avvisi.find((a) => a.livello === 'grave')
   if (grave) return { livello: 'grave', testo: grave.testo }
 
@@ -189,6 +244,24 @@ export function salute(stato: Stato): Salute {
       testo:
         `Flusso non attivo in ${mute.length === 1 ? `"${mute[0]!.nome}"` : `${mute.length} Zone`}` +
         ` (${mute[0]!.scrittore}): da li non esce audio.`,
+    }
+  }
+
+  // Il fotogramma di una Telecamera ha scambiato gli assi: il telefono ha
+  // ruotato il video. Si dice per un minuto (`FINESTRA_ROTAZIONE_MS`), poi
+  // resta solo la geometria nella spia della cella. Sta sotto ai guasti gravi
+  // e sopra al Flusso indietro e al disco quasi pieno: quelli restano e si
+  // rileggono dopo, questo passa.
+  const ruotate = ruotateDiRecente(stato, adesso)
+  if (ruotate.length > 0) {
+    const ultima = ruotate[0]!
+    const quale = ultima.geometria ? ` (ora ${ultima.geometria})` : ''
+    return {
+      livello: 'attenzione',
+      testo:
+        ruotate.length === 1
+          ? `Il video di "${ultima.nome}" ha ruotato${quale}.`
+          : `${ruotate.length} Telecamere hanno ruotato il video, l'ultima "${ultima.nome}"${quale}.`,
     }
   }
 

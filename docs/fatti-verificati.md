@@ -1070,3 +1070,130 @@ l'altro), riproducendo la pipeline di registrazione con i moduli veri `MuxTs`/`P
   `pkill -x snapserver` prima: 260 test, 255 passati, 5 saltati (registrazione, vogliono `ffprobe`
   nel PATH), 0 falliti, esito 0. Prima della suite: `ss -ltn | grep 1705` deve essere vuoto.
 
+## L'orientamento delle Telecamere, letto nel sorgente upstream il 19 settembre 2026
+
+Regia si accorge che una Telecamera è stata girata leggendo la geometria dell'SPS di ogni
+fotogramma chiave (ADR 0013). Le righe qui sotto dicono perché dal video e non dal telefono.
+Valgono per android-ip-camera `main` al 19 settembre 2026, cioè la **v0.13.1** (PR #101 del 17
+settembre): la sezione più in alto si ferma alla v0.12.0, e su questo punto le due versioni si
+comportano in modo opposto.
+
+- **[sorgente]** ⚠️ **L'app ha due percorsi per l'H.264, e solo uno scambia gli assi.** In
+  **modalità surface** — `supportsSurfaceEncoder()` in `StreamingService.kt`: obiettivo
+  **posteriore** e HAL `FULL` o `LEVEL_3`, cioè il caso normale — l'encoder nasce una volta sola
+  con `H264HardwareEncoder(want.width, want.height, …, useSurface = true)` e `CameraGlPipe`
+  **impagina** il contenuto ruotato dentro quella geometria fissa (`glViewport` con le bande
+  nere): la geometria dell'SPS non cambia mai. In **modalità byte-buffer** — obiettivo frontale,
+  HAL `LIMITED`/`LEGACY` — `H264StreamingEncoder.processFrame` calcola `totalRotation =
+  imageInfo.rotationDegrees + rotate-pref`, e per 90/270 fa `outW = image.height` ricreando
+  l'encoder: lì e **solo** lì un telefono in piedi dichiara `720x1280`. Il ramo che scambia esce
+  subito in surface (`if (enc != null && enc.useSurface) return`). **Prima della 0.13.1** (issue
+  #100) `rotate=` non toccava affatto `/video/h264` in nessuna modalità.
+- **[misurato]** ⚠️ **Sul telefono della casa (`192.168.1.7`, obiettivo posteriore `0:2`,
+  `streamRes=1280x720`) l'orientamento non esce dal telefono, in nessuna forma.** Il 19 settembre
+  2026, con Regia viva: il fotogramma chiave dichiara `1280x720` e, decodificato, contiene
+  **un'immagine verticale fra due bande nere** — cioè la modalità surface qui sopra. Girando
+  fisicamente il telefono lo stream si ferma un istante (la camera si ri-lega) e riprende
+  **identico**: stessa geometria, stesse bande, e nessun campo di `/info.json` cambia.
+  `?rotate=90` viene accettato (`/info.json` passa a `"rotate": "90"`) ma `/video/h264` resta
+  uguale, perché l'app installata è **precedente alla 0.13.1**: il suo pannello contiene
+  `h264Rotation()`, la funzione che la PR #101 ha rimosso. Anche lo scatto non aiuta:
+  `/video/snapshot` esce `4000x3000` orizzontale con il telefono in piedi (le dimensioni si
+  leggono nei primi 1255 byte del JPEG, ma il numero non segue il verso dell'immagine).
+  → Su questo parco telefoni la rilevazione dell'ADR 0013 **non può scattare**, e non è una
+  questione di implementazione: l'informazione non c'è. Vedi la correzione in fondo all'ADR.
+- **[sorgente]** **`/info.json` non dice il verso del video che esce.** `StreamingServerHelper.kt`
+  scrive `cameras[].sensorOrientation` (fisso per obiettivo) e `cameras[].lensSettings.rotate` (la
+  preferenza `rotate=`), e in `settings` `streamRes`, che è la preferenza e non la geometria emessa.
+  Nessun campo riporta la rotazione automatica (`imageInfo.rotationDegrees`) né la dimensione
+  dell'SPS: l'unico posto in cui la geometria vera compare è il flusso.
+- **[sorgente]** **La rotazione automatica si aggiorna solo quando la camera si ri-lega**, e solo
+  in modalità byte-buffer. `CameraXCapture.kt` non chiama mai `setTargetRotation` e non ha
+  ascoltatori di orientamento; `StreamingService.kt` lega CameraX al ciclo di vita del **servizio**
+  (`CameraXCapture(this, this, …)`, un `LifecycleService`), non dell'Activity; il manifest non ha
+  `screenOrientation` né `configChanges`. I rebind avvengono su `camera`, `resolution` e `api`
+  (`debouncedStartCamera`), sui rebind spontanei di `auto` (ADR 0012) e **a ogni client H.264 che
+  si collega o si scollega** (`onClientConnected`/`onClientDisconnected`), quindi ogni volta che
+  Regia apre o chiude un'anteprima o il REC. Con `?rotate=` il cambio è invece immediato in
+  entrambe le modalità (nel byte-buffer perché `processFrame` rilegge la preferenza a ogni
+  fotogramma, nel surface perché `handleRemoteControl` scrive `rotation` sul GL pipe) — ma in
+  surface cambia solo l'impaginazione dentro il fotogramma, non la sua geometria.
+- **[sorgente]** Un giro di **180°** non scambia gli assi: da un SPS non si vede, e Regia non lo
+  segnala. Lo stesso per `mirror`.
+- **[misurato]** Gli SPS di libopenh264 (l'ffmpeg in `vendor/` non ha libx264) per 720×1280,
+  360×640 e 1080×1920 si leggono con `geometriaDi` esattamente come quelli di libx264: sono i
+  casi verticali di `annexb.test.ts`, e il telefono finto di `gestore.test.ts` che manda un chiave
+  1280×720 e poi uno 720×1280 produce la riga «ruotata» nel Diario e `orientamento: 'verticale'`
+  nello stato. Provato contro un telefono finto, **non** contro uno vero.
+- **Da misurare, se si decide di riprendere la strada:** con l'app aggiornata a ≥ 0.13.1, se
+  `?rotate=90` sull'obiettivo posteriore cambia davvero l'immagine (dovrebbe: GL pipe) e se la
+  geometria resta comunque fissa (dovrebbe); sull'obiettivo **frontale** dello stesso telefono, se
+  gli assi si scambiano come dice il sorgente (è l'unico percorso in cui la rilevazione attuale può
+  scattare); quanto costa in banda l'impaginazione — a `1280x720` l'immagine utile è la striscia
+  centrale 9:16, cioè **405×720**, con due bande nere da 437 px pagate a prezzo pieno.
+
+
+## Ruotare il registrato senza ricodificare, misurato il 19 settembre 2026
+
+Le misure dietro l'[ADR 0014](adr/0014-la-rotazione-la-dichiara-l-operatore-e-la-applica-regia.md),
+fatte con l'ffmpeg in `vendor/` (`N-126574-g912208af28`).
+
+- **[misurato]** ⚠️ **`-metadata:s:v:0 rotate=90` non scrive niente**: il file esce con la matrice
+  identità (`a=0 b=0 c=0 d=0` letta a mano nell'atomo `tkhd`) e `ffmpeg -i` non riporta nessuna
+  `Display Matrix`. È la strada che si trova ovunque nei forum, ed è morta: su questo build viene
+  accettata in silenzio e ignorata. Quella viva è **`-display_rotation:v:0 <gradi>`**, che scrive
+  la matrice (`b=1.0` → rotazione 90°) e funziona con `-c:v copy`. È un'opzione dell'**ingresso**:
+  va prima di `-i`, non dopo.
+- **[misurato]** **`-display_rotation` gira in senso antiorario.** Verificato all'occhio, non
+  letto: dai fotogrammi veri del telefono (immagine verticale impaginata in 1280×720) sono stati
+  costruiti due MP4, uno con `90` e uno con `-90`, e riestratti con l'autorotazione di ffmpeg. Con
+  `-90` il monitor passa da sopra a destra, cioè un quarto di giro **orario**. Quindi la
+  `rotazione` di Regia, che è in gradi orari, entra in ffmpeg col segno invertito.
+- **[misurato]** **Da capo a fondo sul telefono vero.** Dichiarata `rotazione: 90` su
+  «Telecamera 3» e registrati 8 s dalla Regia viva: il file esce `1280x720` con
+  `Display Matrix: rotation of -90.00 degrees`, traccia video `h264 (High)` **non ricodificata**
+  (`-c:v copy`) e audio `aac` accanto; estratto un fotogramma, l'inquadratura è dritta. Il Diario
+  scrive «girata di 90° in senso orario» e, se il REC è già acceso, avverte che la rotazione vale
+  dal file successivo — un MP4 ha una sola matrice, scritta quando ffmpeg parte.
+- **[misurato]** **La rotazione dell'anteprima non costa un fotogramma chiave.** Si applica in
+  fase di disegno sulla `<canvas>` (tela con i lati scambiati e contesto ruotato): il
+  `VideoDecoder` non viene toccato, quindi la cella non diventa nera quando l'Operatore gira una
+  Telecamera.
+- **Da verificare sul PC dell'evento:** che Windows Media Player e Foto onorino la matrice. VLC e
+  ffmpeg la onorano di sicuro; quei due sono già stati severi una volta (ADR 0012).
+
+## Le bande nere del telefono, misurate il 19 settembre 2026
+
+Contro `192.168.1.7` (obiettivo posteriore `0:2`), telefono in piedi, decodificando i fotogrammi
+chiave che Regia riceve e misurando le colonne e le righe non nere.
+
+- **[misurato]** ⚠️ **Il telefono impagina, non ritaglia.** Con `?resolution=1280x720` il
+  fotogramma è 1280×720 ma l'immagine utile è **405×720**, centrata, con 437 px di nero a sinistra
+  e 438 a destra: due terzi del fotogramma sono nero, pagato in banda e scritto nelle
+  registrazioni. Con `1280x960` l'immagine è 720×960 (280 px di nero per lato); con `720x1280` è
+  720×960 (160 px sopra e sotto); con **`960x1280`** e con `720x960` il fotogramma esce **pieno,
+  zero bande**. La regola è il rapporto: l'obiettivo dà 3:4 in verticale, e riempie solo una
+  geometria 3:4.
+- **[misurato]** ⚠️ **La geometria da chiedere dipende dal sensore, non da come si vuole vedere il
+  video.** Legando `risoluzioneRipresa()` alla rotazione dichiarata (coricata per un quarto di
+  giro, dritta altrimenti) le Telecamere dichiarate a 0 tornavano a 720×960 dentro 1280×960, cioè
+  280 px di nero per lato — «sembra croppato». Il dato giusto è
+  `cameras[].sensorOrientation` dell'obiettivo attivo in `/info.json`: vale **90** sugli obiettivi
+  posteriori del telefono della casa e **270** sui frontali, cioè sensore coricato, immagine
+  raddrizzata dall'app e quindi **verticale** — e allora serve un fotogramma verticale. La
+  rotazione dichiarata riguarda solo l'anteprima e la matrice del file.
+- **[misurato]** **Il telefono accetta geometrie verticali.** `?resolution=720x1280` e
+  `?resolution=960x1280` sono state accettate e il flusso è uscito esattamente di quelle
+  dimensioni (SPS letto dal flusso vero). → `risoluzioneRipresa()` può chiedere la geometria
+  coricata quando la Telecamera è dichiarata girata (ADR 0014).
+- **[misurato]** ⚠️ **Cambiare geometria chiude il flusso, e un ffmpeg già avviato muore senza
+  scrivere niente.** Accendendo il REC subito dopo un cambio di rotazione: «Could not detect TS
+  packet size», «could not find codec parameters», «Error opening input files: End of file»,
+  ffmpeg uscito con 187, due tentativi e **zero file**. Con ffmpeg che nasce al primo byte invece
+  che all'accensione del REC, la stessa sequenza produce una registrazione sana (misurato subito
+  dopo, stesso telefono).
+- **[misurato]** **Da capo a fondo, con la rotazione dichiarata a 90°:** il telefono sta a
+  `960x1280` pieno, l'anteprima riempie la cella, e il file esce `960x1280` con
+  `Display Matrix: rotation of -90.00 degrees`, cioè **1280×960 orizzontale** per chi lo apre,
+  video `-c:v copy` non ricodificato e audio AAC accanto. Estratto un fotogramma: inquadratura
+  dritta, piena, senza bande.

@@ -66,6 +66,19 @@ export type Altoparlante = z.infer<typeof zAltoparlante>
 
 // ----------------------------------------------------------- Telecamera
 
+/**
+ * Quanto Regia gira l'immagine di una Telecamera, in gradi **orari**
+ * (ADR 0014). Lo dichiara l'Operatore in Setup: il telefono non sa dire come
+ * e montato, e un telefono montato di traverso ci resta tutta la serata.
+ */
+export const zRotazione = z.union([
+  z.literal(0),
+  z.literal(90),
+  z.literal(180),
+  z.literal(270),
+])
+export type Rotazione = z.infer<typeof zRotazione>
+
 export const zTelecamera = z.object({
   id: zTelecameraId,
   nome: z.string().min(1).max(40),
@@ -76,6 +89,15 @@ export const zTelecamera = z.object({
   /** Cifrata con DPAPI (§6). Mai in chiaro sul disco, mai nel file esportato. */
   passwordCifrata: z.string().nullable(),
   zonaId: zZonaId.nullable(),
+  /**
+   * Di quanto Regia gira l'immagine, in gradi orari (ADR 0014). Si applica
+   * all'anteprima e alla registrazione, non al telefono.
+   *
+   * Ha un default, e per questo non alza `VERSIONE_PROGETTO`: un progetto
+   * scritto prima che questo campo esistesse si apre senza migrazioni, con le
+   * Telecamere dritte -- che e come si comportavano.
+   */
+  rotazione: zRotazione.default(0),
 })
 export type Telecamera = z.infer<typeof zTelecamera>
 
